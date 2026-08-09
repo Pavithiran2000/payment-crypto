@@ -1,0 +1,38 @@
+{
+  "name": "payment-platform",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=22.11.0"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:generate": "pnpm --filter @pp/database generate",
+    "db:migrate": "pnpm --filter @pp/database migrate",
+    "db:seed": "node scripts/seed.mjs",
+    "api:dev": "pnpm --filter @pp/api dev",
+    "web:dev": "pnpm --filter @pp/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "smoke": "node scripts/smoke.mjs",
+    "check:erasure": "node scripts/erasure-check.mjs",
+    "verify": "pnpm build && pnpm lint && pnpm smoke && pnpm check:erasure"
+  },
+  "pnpmComment": "overrides.fastify: Fastify plugins augment the FastifyInstance type. Multiple copies of fastify in the tree means those augmentations land on different type identities and plugin registration fails to type-check. Pin one copy.",
+  "pnpm": {
+    "overrides": {
+      "fastify": "5.11.0"
+    }
+  },
+  "devDependencies": {
+    "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.36.0",
+    "@eslint/js": "^9.14.0",
+    "eslint": "^9.14.0",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.13.0"
+  }
+}

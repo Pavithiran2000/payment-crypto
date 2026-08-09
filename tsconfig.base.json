@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "declaration": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true
+    // No `paths` mapping: packages resolve through the pnpm workspace symlinks
+    // to each other's built `dist` via package.json "exports". That keeps each
+    // package's rootDir clean and means a consumer type-checks against exactly
+    // what it will import at runtime. Build order is dependency order.
+  },
+  "exclude": ["node_modules", "dist"]
+}

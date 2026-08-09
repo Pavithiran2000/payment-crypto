@@ -1,0 +1,82 @@
+/**
+ * Money is NEVER a float. Two representations, both integer-based:
+ *
+ *  - Fiat   -> minor units (cents/paise) as bigint.  USD 12.34 => 1234n, decimals 2
+ *  - Crypto -> base units (wei/satoshi) as bigint.   1 USDT    => 1000000n on a 6-dec chain
+ *
+ * `decimals` is stored per asset, never hardcoded: USDT is 6 decimals on Ethereum
+ * and Polygon but 18 on BSC. Hardcoding it is a real and common loss event.
+ *
+ * bigint does not survive JSON.stringify, so amounts cross the API boundary as
+ * decimal strings and are parsed back at the edge. Never `Number(amount)`.
+ */
+
+export type FiatCurrency = 'USD' | 'EUR' | 'GBP' | 'AUD' | 'SGD';
+export type CryptoAsset = 'USDT' | 'USDC';
+export type ChainNetwork = 'polygon' | 'ethereum';
+
+export interface Money {
+  /** Integer amount in the asset's smallest unit. */
+  readonly amount: bigint;
+  /** Number of decimal places the smallest unit represents. */
+  readonly decimals: number;
+  readonly currency: string;
+}
+
+export const FIAT_DECIMALS: Record<FiatCurrency, number> = {
+  USD: 2,
+  EUR: 2,
+  GBP: 2,
+  AUD: 2,
+  SGD: 2,
+};
+
+/** Asset decimals are network-specific. Look up, never assume. */
+export const ASSET_DECIMALS: Record<CryptoAsset, Record<ChainNetwork, number>> = {
+  USDT: { polygon: 6, ethereum: 6 },
+  USDC: { polygon: 6, ethereum: 6 },
+};
+
+export class MoneyParseError extends Error {}
+
+/**
+ * Parse a human decimal string ("12.34") into integer minor units.
+ * Rejects floats, exponent notation and excess precision rather than rounding —
+ * silent rounding of money is how reconciliation breaks.
+ */
+export function parseDecimal(input: string, decimals: number): bigint {
+  if (!/^\d+(\.\d+)?$/.test(input)) {
+    throw new MoneyParseError(`Not a plain decimal string: ${input}`);
+  }
+  const [whole = '0', frac = ''] = input.split('.');
+  if (frac.length > decimals) {
+    throw new MoneyParseError(
+      `${input} has ${frac.length} decimal places, currency allows ${decimals}`,
+    );
+  }
+  return BigInt(whole + frac.padEnd(decimals, '0'));
+}
+
+/** Render integer minor units back to a decimal string for display/transport. */
+export function formatDecimal(amount: bigint, decimals: number): string {
+  const negative = amount < 0n;
+  const abs = negative ? -amount : amount;
+  const s = abs.toString().padStart(decimals + 1, '0');
+  const whole = s.slice(0, s.length - decimals);
+  const frac = decimals > 0 ? '.' + s.slice(s.length - decimals) : '';
+  return `${negative ? '-' : ''}${whole}${frac}`;
+}
+
+export function fiat(input: string, currency: FiatCurrency): Money {
+  const decimals = FIAT_DECIMALS[currency];
+  return { amount: parseDecimal(input, decimals), decimals, currency };
+}
+
+export function crypto(input: string, asset: CryptoAsset, network: ChainNetwork): Money {
+  const decimals = ASSET_DECIMALS[asset][network];
+  return { amount: parseDecimal(input, decimals), decimals, currency: asset };
+}
+
+export function formatMoney(m: Money): string {
+  return formatDecimal(m.amount, m.decimals);
+}
