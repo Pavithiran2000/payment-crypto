@@ -139,7 +139,7 @@ pnpm db:seed
 
 This runs `scripts/seed.mjs`, which loads `DATABASE_URL` from `.env` automatically (via `dotenv/config`) and spawns `psql -d <url> -f scripts/seed.sql` directly — no shell variable export needed, and it works the same on Windows/macOS/Linux. It's safe to re-run; the seed data uses `ON CONFLICT DO NOTHING`.
 
-This inserts one pre-approved test merchant (`Acme Test Merchant Pvt Ltd`, id `11111111-1111-1111-1111-111111111111`) and one pre-approved payout destination (USDT on Polygon, settling to a ZebPay-style custodial address). The storefront is currently wired to offer only this one crypto/network combination — see `apps/web/src/lib/payment-config.ts` — because it's the only payout destination that exists.
+This inserts one pre-approved test merchant (`Acme Test Merchant Pvt Ltd`, id `11111111-1111-1111-1111-111111111111`) and one pre-approved payout destination (USDT on Polygon, settling to a Binance Entity Account address). The storefront is currently wired to offer only this one crypto/network combination — see `apps/web/src/lib/payment-config.ts` — because it's the only payout destination that exists.
 
 ---
 

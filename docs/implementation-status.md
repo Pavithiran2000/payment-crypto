@@ -172,10 +172,10 @@ is backwards.
 Sandbox access does **not** answer this. Staging keys are typically self-serve;
 they tell you nothing about whether the model is permitted in production.
 
-**Get answers in writing, from both Transak and ZebPay:**
+**Get answers in writing, from both Transak and Binance:**
 
 - [ ] May the payer and the receiving wallet owner be different parties?
-- [ ] May the beneficiary be an Indian corporate entity holding a ZebPay account?
+- [ ] May the beneficiary be a corporate entity holding a Binance Entity Account?
 - [ ] Which payer geographies are supported for this pattern?
 - [ ] Which asset and network, exactly?
 - [ ] Per-transaction and monthly limits for a corporate beneficiary?

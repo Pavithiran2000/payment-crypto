@@ -134,7 +134,7 @@ export const orders = pgTable(
 
     providerOrderId: text('provider_order_id'),
     chainTxHash: text('chain_tx_hash'),
-    zebpayCredited: boolean('zebpay_credited').notNull().default(false),
+    binanceCredited: boolean('binance_credited').notNull().default(false),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),

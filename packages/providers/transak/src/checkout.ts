@@ -23,7 +23,7 @@ export interface CheckoutParams {
   fiatCurrency: string;
   cryptoAsset: string;
   network: string;
-  /** The approved ZebPay corporate deposit address. */
+  /** The approved Binance Entity Account deposit address. */
   walletAddress: string;
   customerEmail?: string | undefined;
 }

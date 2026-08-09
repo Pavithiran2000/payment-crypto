@@ -1,8 +1,8 @@
 # Card → Crypto Payment Platform
 
 Orchestration layer for card-funded fiat-to-crypto settlement: Transak processes
-the card payment, payer KYC and conversion; crypto lands in a ZebPay corporate
-account; this platform creates orders, verifies webhooks and keeps the record.
+the card payment, payer KYC and conversion; crypto lands in a Binance Entity
+Account; this platform creates orders, verifies webhooks and keeps the record.
 
 **Design source:** `transak_zebpay_card_to_crypto_simple_report_updated.md`
 **Status:** sandbox vertical slice. Not production-ready — see [Not built yet](#not-built-yet).
@@ -126,8 +126,8 @@ Ordered by how much it matters:
 
 **Nothing here should process a real card until these are settled.**
 
-1. **Written confirmation from Transak and ZebPay** that payer ≠ beneficiary is
-   permitted for an Indian corporate account, naming the asset, network and
+1. **Written confirmation from Transak and Binance** that payer ≠ beneficiary is
+   permitted for a Binance Entity Account, naming the asset, network and
    geographies. This is a binary business risk and it is not an engineering task.
    The report sequences it in Phase 4; it belongs in Phase 0.
 2. **Confirm the live webhook signing scheme.** `packages/providers/transak/src/webhook.ts`
