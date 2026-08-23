@@ -57,6 +57,26 @@ export function parseDecimal(input: string, decimals: number): bigint {
   return BigInt(whole + frac.padEnd(decimals, '0'));
 }
 
+/**
+ * Parse a decimal string that may be padded with insignificant trailing zeros
+ * beyond the asset's precision.
+ *
+ * Providers commonly render every amount at the chain's full precision: Stripe
+ * returns `"0.123400000000000000"` for an 18-decimal asset, and would return
+ * more decimal places than a 6-decimal USDC balance can hold. Those zeros carry
+ * no value, so rejecting them would fail a webhook over a formatting choice.
+ * Genuinely excess precision — a non-zero digit past the asset's decimals —
+ * still throws, because that is a real mismatch and not an artefact.
+ */
+export function parseDecimalPadded(input: string, decimals: number): bigint {
+  if (!/^\d+(\.\d+)?$/.test(input)) {
+    throw new MoneyParseError(`Not a plain decimal string: ${input}`);
+  }
+  const [whole = '0', frac = ''] = input.split('.');
+  const trimmed = frac.length > decimals ? frac.replace(/0+$/, '') : frac;
+  return parseDecimal(trimmed.length > 0 ? `${whole}.${trimmed}` : whole, decimals);
+}
+
 /** Render integer minor units back to a decimal string for display/transport. */
 export function formatDecimal(amount: bigint, decimals: number): string {
   const negative = amount < 0n;

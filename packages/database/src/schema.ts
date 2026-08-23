@@ -132,7 +132,19 @@ export const orders = pgTable(
     status: orderStatusEnum('status').notNull().default('CREATED'),
     statusChangedAt: timestamp('status_changed_at', { withTimezone: true }).notNull().defaultNow(),
 
+    /** Stripe onramp session id (`cos_...`). The join key for inbound events. */
     providerOrderId: text('provider_order_id'),
+    /**
+     * The onramp session's `client_secret`. Held so a customer who refreshes or
+     * comes back later resumes the same session instead of paying twice.
+     *
+     * Not a payment credential and not customer PII - it is a handle to a
+     * session that already knows our own deposit address. It is still never
+     * logged, never put in a URL, and never returned by the public order
+     * projection; it leaves the API only through the server-side BFF, and only
+     * while the order is non-terminal.
+     */
+    providerClientSecret: text('provider_client_secret'),
     chainTxHash: text('chain_tx_hash'),
     binanceCredited: boolean('binance_credited').notNull().default(false),
 

@@ -13,13 +13,13 @@ implementation. See `PAYMENT_INTEGRATION_PLAN.md` for the design rationale and p
 |---|---|---|
 | **Storefront (Next.js)** | `apps/web` | Public-facing catalog/checkout UI. App Router, port `3001`. |
 | **Web BFF (Route Handlers)** | `apps/web/src/app/api/**` | Server-only proxy between the browser and the gateway. Holds the shared secret and merchant ID; the browser never sees either. |
-| **Payment Gateway API (NestJS)** | `apps/api` | Owns orders, payout destinations, and the Transak integration. Fastify adapter, port `3000`. |
-| **Webhook ingestion** | `apps/api/src/webhooks` | Verifies and records Transak's signed status callbacks; the *only* writer of order status. |
-| **Provider adapter** | `packages/providers/transak` | Builds the hosted-checkout URL, verifies webhook signatures, maps Transak's status vocabulary to internal `OrderStatus`. |
+| **Payment Gateway API (NestJS)** | `apps/api` | Owns orders, payout destinations, and the Stripe onramp integration. Fastify adapter, port `3000`. |
+| **Webhook ingestion** | `apps/api/src/webhooks` | Verifies and records Stripe's signed `crypto.onramp_session.updated` events; the *only* writer of order status. |
+| **Provider adapter** | `packages/providers/stripe-onramp` | Mints onramp sessions against `POST /v1/crypto/onramp_sessions`, verifies webhook signatures, maps Stripe's session statuses to internal `OrderStatus`. |
 | **Database layer** | `packages/database` | Drizzle ORM + Postgres schema: `orders`, `payoutDestinations`, `orderStatusHistory`, `providerEvents`, `outbox`, `dataSubjects`. Per-order PII encryption (DEK-wrapped). |
 | **Shared types** | `packages/shared-types` | Zero-dependency package: `OrderStatus` state machine, `Money` (bigint decimal) helpers, currency/asset decimal tables. Imported by both `apps/api` and `apps/web`. |
-| **Transak (external)** | — | Hosted checkout (card → crypto on-ramp) and the only source of payment-status truth, delivered via signed webhook. |
-| **Binance Entity Account (external)** | — | Fixed settlement destination; the customer never chooses it (`disableWalletAddressForm=true`). |
+| **Stripe onramp (external)** | — | Card → crypto on-ramp. Stripe is the *merchant of record*: it takes the card, runs payer KYC and sanctions screening, converts, and delivers on-chain. Its signed webhook is the only source of payment-status truth. |
+| **Binance Entity Account (external)** | — | Fixed settlement destination; the customer never chooses it (`lock_wallet_address=true`), and the webhook handler re-checks the delivered address against the approved one. |
 
 ---
 
@@ -45,14 +45,14 @@ flowchart TB
         direction TB
         ApiKeyGuard["ApiKeyGuard<br/>timingSafeEqual(X-API-Key)<br/>guards ALL /orders* routes"]
         OrdersController["OrdersController<br/>POST /orders, GET /orders/:reference"]
-        OrdersService["OrdersService<br/>idempotency check → payout-destination lookup<br/>→ insert order → build checkout URL"]
-        WebhooksController["WebhooksController<br/>POST /webhooks/transak<br/>NOT guarded by ApiKeyGuard —<br/>trusts only its own signature check"]
+        OrdersService["OrdersService<br/>idempotency check → payout-destination lookup<br/>→ mint onramp session → insert order"]
+        WebhooksController["WebhooksController<br/>POST /webhooks/stripe<br/>NOT guarded by ApiKeyGuard —<br/>trusts only its own signature check"]
         WebhooksService["WebhooksService<br/>verifyWebhook() → persist providerEvents (unique)<br/>→ canTransition() → moveTo() → outbox"]
         DB[("Postgres<br/>orders, payoutDestinations,<br/>orderStatusHistory, providerEvents, outbox")]
     end
 
-    subgraph providerTrust["🔵 External — Transak / Binance"]
-        TransakHosted["Transak hosted checkout<br/>(global.transak.com)"]
+    subgraph providerTrust["🔵 External — Stripe / Binance"]
+        StripeOnramp["Stripe onramp widget<br/>(js.stripe.com + crypto-js.stripe.com)"]
         Binance["Binance Entity Account<br/>(fixed payout address)"]
     end
 
@@ -62,17 +62,17 @@ flowchart TB
     PaymentApi -->|"3 POST /orders<br/>X-API-Key + Idempotency-Key headers"| ApiKeyGuard
     ApiKeyGuard --> OrdersController --> OrdersService
     OrdersService <-->|"lookup destination, insert order"| DB
-    OrdersService -->|"4 checkoutUrl (partnerOrderId, walletAddress,<br/>disableWalletAddressForm=true)"| OrdersController
+    OrdersService -->|"4 session id + client_secret<br/>(wallet_addresses[net], lock_wallet_address=true,<br/>metadata[partner_order_id])"| OrdersController
     OrdersController -->|"5"| PaymentApi --> CheckoutRoute -->|"{reference, checkoutUrl} only"| UI
-    UI -->|"6 window.location.href = checkoutUrl"| Browser
-    Browser -->|"7 redirected to hosted checkout"| TransakHosted
-    TransakHosted -->|"8 card payment, KYC, conversion"| TransakHosted
-    TransakHosted -->|"9 settles crypto to fixed address"| Binance
-    TransakHosted -.->|"10 signed webhook (HMAC/JWT)<br/>— sole source of status truth"| WebhooksController
+    UI -->|"6 navigate to /checkout/onramp/[reference]"| Browser
+    Browser -->|"7 mounts widget in an iframe on our own page"| StripeOnramp
+    StripeOnramp -->|"8 card payment, KYC, conversion"| StripeOnramp
+    StripeOnramp -->|"9 settles crypto to locked address"| Binance
+    StripeOnramp -.->|"10 signed webhook (Stripe-Signature)<br/>— sole source of status truth"| WebhooksController
     WebhooksController --> WebhooksService
     WebhooksService <-->|"verify, dedupe, canTransition, moveTo"| DB
-    TransakHosted -->|"11 browser redirect (NOT trusted)<br/>TRANSAK_REDIRECT_URL"| Browser
-    Browser -->|"12 lands on /checkout/return"| UI
+    StripeOnramp -->|"11 onramp_session_updated event (NOT trusted)"| Browser
+    Browser -->|"12 router.push to /orders/[reference]"| UI
     UI -->|"13 poll GET /api/orders/[reference] every 4s"| OrderRoute
     OrderRoute --> PaymentApi -->|"GET /orders/:reference"| ApiKeyGuard --> OrdersController --> OrdersService --> DB
 
@@ -83,7 +83,7 @@ flowchart TB
     class Browser untrustedStyle
     class UI,CheckoutRoute,OrderRoute,PaymentApi bffStyle
     class ApiKeyGuard,OrdersController,OrdersService,WebhooksController,WebhooksService,DB apiStyle
-    class TransakHosted,Binance extStyle
+    class StripeOnramp,Binance extStyle
 ```
 
 ### Trust boundaries, explicitly
@@ -109,16 +109,17 @@ flowchart TB
    `/api/orders/[reference]` returns only status-relevant fields (reference, status, amount,
    currency, asset, network) — no internal IDs, no PII.
 
-4. **Browser redirect ↔ webhook (the trust model's core boundary).** The Transak redirect landing
-   on `/checkout/return` is a **navigation event, not proof of payment** — it is never used to
-   advance order status. Only `POST /webhooks/transak`, verified via `verifyWebhook()`
-   (HMAC-header or JWT-body scheme, configured per `TRANSAK_WEBHOOK_SCHEME`), can move an order
+4. **Client event ↔ webhook (the trust model's core boundary).** The widget's
+   `onramp_session_updated` event is a **UI signal, not proof of payment** — it is never used to
+   advance order status, only to stop making the customer stare at a finished form. Only
+   `POST /webhooks/stripe`, verified via `verifyWebhook()` (HMAC-SHA256 over `<t>.<rawBody>`
+   against `STRIPE_ONRAMP_WEBHOOK_SECRET`, `v1` scheme only, ±5 minutes), can move an order
    forward. This is enforced at two independent layers: the webhook route rejects unverifiable
-   payloads (401), and `OrdersController`'s `GET /orders/:reference` handler comment states
+   payloads (400), and `OrdersController`'s `GET /orders/:reference` handler comment states
    explicitly it only ever reads a value **only a verified webhook writes**.
 
 5. **Webhook controller is intentionally *not* behind `ApiKeyGuard`.** `WebhooksController` is a
-   separate `@Controller('webhooks')`, not decorated with `@UseGuards(ApiKeyGuard)` — Transak
+   separate `@Controller('webhooks')`, not decorated with `@UseGuards(ApiKeyGuard)` — Stripe
    cannot present the web BFF's shared secret, so the webhook route authenticates purely via
    signature verification against `rawBody`. Confirmed by reading `app.module.ts`: `ApiKeyGuard`
    is registered as an injectable provider (constructor-injected into `OrdersController`), not as
@@ -128,8 +129,8 @@ flowchart TB
    order gets its own `dataSubjects` row with a wrapped DEK; `customerEmailEnc` is
    application-layer encrypted, with a separate `customerEmailIdx` blind index for lookup.
 
-7. **apps/api ↔ Transak/Binance (settlement boundary).** `buildCheckoutUrl` sets
-   `disableWalletAddressForm=true` and passes a `walletAddress` sourced only from an **approved,
+7. **apps/api ↔ Stripe/Binance (settlement boundary).** `buildSessionForm` sets
+   `lock_wallet_address=true` and passes a `wallet_addresses[<network>]` sourced only from an **approved,
    unrevoked, active** row in `payoutDestinations` — the payer can never redirect settlement to
    their own address.
 
@@ -145,7 +146,7 @@ sequenceDiagram
     participant BFF as apps/web BFF<br/>(/api/checkout)
     participant API as apps/api<br/>(OrdersController/Service)
     participant DB as Postgres
-    participant TX as Transak hosted checkout
+    participant TX as Stripe onramp
     participant WH as apps/api<br/>(WebhooksController/Service)
 
     C->>Web: Fill contact/billing form, pick USDT/Polygon
@@ -165,16 +166,16 @@ sequenceDiagram
             Web-->>C: inline error message
         else destination found
             API->>DB: BEGIN TX: insert dataSubjects, insert orders (status=CREATED),<br/>insert orderStatusHistory
-            API->>API: buildCheckoutUrl(partnerOrderId, walletAddress,<br/>disableWalletAddressForm=true, redirectURL)
+            API->>TX: POST /v1/crypto/onramp_sessions<br/>lock_wallet_address=true, wallet_addresses[network],<br/>metadata[partner_order_id], Idempotency-Key
         end
     end
     API-->>BFF: 200 {reference, checkoutUrl, ...}
     BFF-->>Web: 200 {reference, checkoutUrl}
     Web->>C: window.location.href = checkoutUrl
-    C->>TX: GET hosted checkout (card entry, KYC, conversion)
+    C->>TX: mount widget on /checkout/onramp/[reference] (card entry, KYC, conversion)
     TX->>TX: Process card payment → KYC → convert to crypto
-    TX->>WH: POST /webhooks/transak (signed HMAC/JWT, rawBody)
-    WH->>WH: verifyWebhook(scheme, secret, rawBody, headers)
+    TX->>WH: POST /webhooks/stripe (Stripe-Signature, rawBody)
+    WH->>WH: verifyWebhook(secret, rawBody, headers)
     alt signature invalid
         WH-->>TX: 401 signature verification failed
     else signature valid
@@ -194,9 +195,9 @@ sequenceDiagram
             end
         end
     end
-    TX-->>C: browser redirect to TRANSAK_REDIRECT_URL (NOT trusted as proof)
-    C->>Web: GET /checkout/return?partnerOrderId=...
-    Web->>Web: probe candidate query keys, redirect to /orders/[reference]
+    TX-->>C: onramp_session_updated event (NOT trusted as proof)
+    C->>Web: router.push /orders/[reference]
+    Web->>Web: render whatever the webhook-driven record says
     loop every 4000ms until isTerminal(status)
         Web->>BFF: GET /api/orders/[reference]
         BFF->>API: GET /orders/:reference (X-API-Key)
@@ -212,10 +213,11 @@ Key properties this sequence encodes:
   retry after a network blip returns the original order rather than creating a duplicate.
 - **Webhook processing is decoupled from the HTTP response** — `ingest()` acknowledges the
   provider immediately after persisting the raw event, then processes asynchronously
-  (`void this.process(...)`), so a slow DB never causes Transak to see a timeout and retry a
+  (`void this.process(...)`), so a slow DB never causes Stripe to see a timeout and retry a
   webhook already on file.
 - **Row-level locking** (`SELECT ... FOR UPDATE`) serializes concurrent webhooks for the same
-  order, preventing lost updates when Transak delivers out-of-order or overlapping events.
+  order, preventing lost updates when Stripe delivers out-of-order or overlapping events —
+  which Stripe explicitly does not guarantee against.
 - **The browser redirect and the status page are read-only observers** — nothing the browser does
   after leaving `apps/web` can change an order's status; only the webhook path writes it.
 
@@ -325,7 +327,7 @@ stateDiagram-v2
    loop (`isTerminal()` in `order-status-tracker.tsx`) — but `COMPLETED` can still transition to
    `DISPUTED`/`MANUAL_REVIEW` later (e.g., a chargeback 120 days out), which is why those two are
    ranked *above* `COMPLETED` rather than being unreachable from it.
-5. **Unrecognized provider statuses never guess.** If `mapTransakStatus()` returns `null` for an
+5. **Unrecognized provider statuses never guess.** If `mapOnrampStatus()` returns `null` for an
    unmapped value, the order goes straight to `MANUAL_REVIEW` rather than being silently ignored
    or misapplied.
 
@@ -339,7 +341,7 @@ stateDiagram-v2
 | Gateway only accepts requests from the trusted BFF | `ApiKeyGuard` (`timingSafeEqual`) on `OrdersController` |
 | No duplicate orders from client retries | `(merchantId, idempotencyKey)` uniqueness check in `OrdersService.create()` |
 | No duplicate webhook processing | Unique `externalEventId` constraint on `providerEvents`, caught via Postgres `23505` |
-| Settlement address cannot be redirected by the payer | `disableWalletAddressForm=true` + `walletAddress` sourced only from an approved `payoutDestinations` row |
+| Settlement address cannot be redirected by the payer | `lock_wallet_address=true` + a `wallet_addresses[<network>]` sourced only from an approved `payoutDestinations` row, **and** a post-hoc check of the delivered `transaction_details.wallet_address` against that row |
 | Order status can only move forward, or along an explicit exception edge | `RANK` check + `ALLOWED` table in `canTransition()` |
 | Browser navigation is never treated as payment proof | `/checkout/return` only redirects to the status page; status itself is written only by `WebhooksService` |
 | Concurrent webhooks for one order can't race | `SELECT ... FOR UPDATE` row lock in `WebhooksService.process()` |

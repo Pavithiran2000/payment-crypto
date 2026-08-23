@@ -11,9 +11,9 @@ export class WebhooksController {
   // emitDecoratorMetadata, which tsx's dev transpile does not reliably emit.
   constructor(@Inject(WebhooksService) private readonly webhooks: WebhooksService) {}
 
-  @Post('transak')
+  @Post('stripe')
   @HttpCode(200)
-  async transak(@Req() req: RawBodyRequest, @Res() reply: FastifyReply): Promise<void> {
+  async stripe(@Req() req: RawBodyRequest, @Res() reply: FastifyReply): Promise<void> {
     if (!req.rawBody) {
       // Without the exact received bytes the HMAC cannot be checked. Failing
       // loudly here beats silently verifying against re-serialized JSON.
@@ -24,9 +24,10 @@ export class WebhooksController {
     const outcome = await this.webhooks.ingest(req.rawBody, req.headers);
 
     if (!outcome.accepted) {
-      // 401, not 400: an unverifiable webhook is an authentication failure, and
-      // the provider should not treat it as retryable.
-      reply.status(401).send({ error: 'signature verification failed' });
+      // 400, following Stripe's own handler examples. Stripe retries any
+      // non-2xx for up to three days, which is the behaviour we want if the
+      // cause is an endpoint secret caught mid-roll rather than a forgery.
+      reply.status(400).send({ error: 'signature verification failed' });
       return;
     }
 

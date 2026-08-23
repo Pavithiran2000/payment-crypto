@@ -4,7 +4,7 @@ Everything you need to go from a fresh `git clone` to a working local checkout f
 
 This monorepo has two runnable apps:
 
-- `apps/api` — NestJS payment gateway (orders, webhooks, Transak integration) — port **3000**
+- `apps/api` — NestJS payment gateway (orders, webhooks, Stripe onramp integration) — port **3000**
 - `apps/web` — Next.js storefront (BFF routes call the API server-side) — port **3001**
 
 plus shared packages under `packages/*` that both depend on.
@@ -77,12 +77,15 @@ DB_SSL=false
 PII_MASTER_KEK=<generate, see below>
 PII_BLIND_INDEX_PEPPER=<generate, see below>
 
-# --- Transak ---
-TRANSAK_ENV=staging
-TRANSAK_API_KEY=<your Transak staging API key>
-TRANSAK_API_SECRET=<your Transak staging API secret>
-TRANSAK_REDIRECT_URL=http://localhost:3001/checkout/return
-TRANSAK_WEBHOOK_SCHEME=hmac-header
+# --- Stripe fiat-to-crypto onramp ---
+STRIPE_SECRET_KEY=<sk_test_... from your Stripe sandbox>
+STRIPE_PUBLISHABLE_KEY=<pk_test_... from your Stripe sandbox>
+STRIPE_ONRAMP_WEBHOOK_SECRET=<whsec_... for this endpoint>
+STRIPE_ONRAMP_MODE=embedded
+# Local only: `pnpm smoke` runs a stub of Stripe's onramp API on this port so
+# the suite works without onramp access. Remove it once you have real keys.
+STRIPE_API_BASE_URL=http://127.0.0.1:4599
+WEB_BASE_URL=http://localhost:3001
 
 # --- retention ---
 AML_RETENTION_DAYS=1825
@@ -101,7 +104,16 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 `PAYMENT_API_KEY` can be any random string — it's a shared secret between `apps/web`'s server-side BFF and `apps/api`; it just has to match what you put in `apps/web/.env.local` in the next step. Generate one the same way if you don't have a preference.
 
-You need real Transak **staging** credentials (`TRANSAK_API_KEY` / `TRANSAK_API_SECRET`) to actually reach Transak's hosted checkout — sign up for a Transak partner staging account if you don't have one yet. Without them, order creation will still work locally but the redirect to Transak's checkout page will fail.
+Stripe's onramp is **access-gated**: submit the onramp application at
+<https://dashboard.stripe.com/crypto-onramp/get-started> before the API keys work,
+in a sandbox as well as in live mode. Most applications are reviewed within 48 hours.
+
+Until you have access, leave `STRIPE_API_BASE_URL` pointing at the local stub
+(`scripts/stripe-stub.mjs`, started automatically by `pnpm smoke`, or run it
+yourself with `node scripts/stripe-stub.mjs`). The stub answers session creation
+so the whole order flow works end to end; only Stripe's own payment UI is absent.
+Once you have real keys, delete `STRIPE_API_BASE_URL` — the API refuses that
+override outright if the secret key is a live one.
 
 ### 3b. Web (`payment-platform/apps/web/.env.local`)
 
@@ -166,11 +178,14 @@ pnpm web:dev
 
 1. Open http://localhost:3001/products, pick a product, set a price/quantity/currency.
 2. Continue to checkout, fill in the contact/billing form, submit.
-3. `apps/web`'s `/api/checkout` Route Handler validates the input, recomputes the total server-side, and calls `POST /orders` on the API with the `X-API-Key` header — you should be redirected to a Transak-hosted checkout URL.
-4. After completing (or abandoning) payment on Transak, you land back on `/checkout/return`, which forwards you to `/orders/<reference>`.
-5. That page polls `GET /api/orders/<reference>` every 4 seconds and shows live status until the order reaches a terminal state (`COMPLETED`, `PAYMENT_FAILED`, etc.) — driven entirely by Transak's signed webhook hitting `POST /webhooks/transak`, never by the browser redirect alone.
+3. `apps/web`'s `/api/checkout` Route Handler validates the input, recomputes the total server-side, and calls `POST /orders` on the API with the `X-API-Key` header. The API mints a Stripe onramp session pinned to the merchant's approved wallet address and returns `/checkout/onramp/<reference>`.
+4. That page fetches the session's `client_secret` server-side and mounts Stripe's onramp widget. The customer's card details and identity documents go to Stripe, never to this site.
+5. When the session reaches `fulfillment_processing`, the widget moves the customer to `/orders/<reference>`, which polls `GET /api/orders/<reference>` every 4 seconds until the order reaches a terminal state (`COMPLETED`, `PAYMENT_FAILED`, …) — driven entirely by Stripe's signed webhook hitting `POST /webhooks/stripe`, never by the browser.
 
-If you don't have real Transak credentials, step 3 will fail at the "redirect to Transak" point — everything up to and including order creation in Postgres still works, which is enough to verify the wiring.
+Against the stub, step 4 mounts Stripe's real widget but the session id is not one
+Stripe knows, so the frame shows an error instead of a payment form. Everything
+either side of it — order creation, the session parameters, webhook verification,
+state transitions — is exercised in full.
 
 ---
 
@@ -183,8 +198,11 @@ If you don't have real Transak credentials, step 3 will fail at the "redirect to
 | `pnpm db:seed` errors "psql was not found on PATH" | Install the PostgreSQL client tools (`psql`) and ensure they're on PATH |
 | API starts but immediately throws a config error | A required env var in `apps/api/.env` (`.env` at repo root) is missing — check against `.env.example`, especially `PAYMENT_API_KEY`, `PII_MASTER_KEK`, `PII_BLIND_INDEX_PEPPER` |
 | Web's `/api/checkout` returns 401 from the API | `PAYMENT_API_KEY` differs between `.env` (api) and `apps/web/.env.local` (web) — they must match exactly |
-| Checkout succeeds but redirect to Transak fails | Missing/invalid `TRANSAK_API_KEY` / `TRANSAK_API_SECRET`, or `TRANSAK_ENV` mismatched with your Transak account type |
-| Order status page never leaves "Processing" | Transak webhooks need a publicly reachable URL to call back to — on localhost you won't receive them; use a tunnel (e.g. ngrok) pointed at `apps/api` port 3000 and register that URL with Transak if you need to test the full webhook path |
+| `POST /api/checkout` returns "Unable to create order" | Check the API log. `crypto_onramp_unsupportable_customer` means Stripe will not serve that geography; `crypto_onramp_merchant_not_properly_setup` means the Stripe account has no public business name/URL set |
+| Order creation fails with a connection error | `STRIPE_API_BASE_URL` points at the stub but the stub is not running — start it with `node scripts/stripe-stub.mjs`, or remove the variable to use the real API |
+| Onramp page loads but the widget shows an error | Expected against the stub: Stripe's JS does not recognise a stubbed session. Needs real onramp credentials |
+| Order status page never leaves "Processing" | Stripe webhooks need a publicly reachable URL — on localhost you will not receive them. Use `stripe listen --forward-to localhost:3000/webhooks/stripe` and put the `whsec_` it prints in `STRIPE_ONRAMP_WEBHOOK_SECRET` |
+| Webhook returns 400 "signature verification failed" | Wrong `STRIPE_ONRAMP_WEBHOOK_SECRET`. The secret from `stripe listen` and the one from a Dashboard endpoint are different — they are not interchangeable |
 | `pnpm install` fails on Windows with symlink errors | Run your shell as Administrator, or enable Windows Developer Mode (Settings → Privacy & Security → For developers) |
 
 ---

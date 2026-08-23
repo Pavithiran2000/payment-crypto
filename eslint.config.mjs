@@ -5,8 +5,9 @@ import tseslint from 'typescript-eslint';
  * Module boundary enforcement.
  *
  * The architecture's central rule is that domain logic must never reach a
- * provider SDK directly - that is what makes Transak replaceable. Nx enforces
- * this with tags; until Nx is added, these ESLint rules do the same job.
+ * provider SDK directly - that is what made swapping the onramp provider a
+ * one-package change rather than a rewrite. Nx enforces this with tags; until
+ * Nx is added, these ESLint rules do the same job.
  */
 export default tseslint.config(
   js.configs.recommended,
@@ -33,6 +34,8 @@ export default tseslint.config(
         fetch: 'readonly',
         setTimeout: 'readonly',
         URL: 'readonly',
+        URLSearchParams: 'readonly',
+        Buffer: 'readonly',
       },
     },
   },

@@ -1,8 +1,11 @@
 # Implementation Status & Next Steps
 
-**Date:** 2026-07-31
+**Date:** 2026-07-31, revised 2026-08-20 (onramp provider swapped to Stripe)
 **Phase:** sandbox vertical slice complete
 **Design source:** `transak_zebpay_card_to_crypto_simple_report_updated.md`
+**Provider change:** [`stripe-onramp-migration.md`](stripe-onramp-migration.md) —
+the original report specified Transak; the onramp leg now runs on Stripe's
+fiat-to-crypto onramp. Read that first if anything below reads as stale.
 
 Part 1 records what exists and why. Part 2 is the work queue, in priority order,
 with enough detail to pick up cold.
@@ -16,7 +19,7 @@ with enough detail to pick up cold.
 One working vertical slice:
 
 ```
-create order → Transak hosted checkout → verified webhook → state transition → record
+create order → Stripe onramp session → embedded widget → verified webhook → state transition → record
 ```
 
 29 source files. Everything below was executed against a live Postgres, not just
@@ -50,9 +53,10 @@ packages/database/
   src/migrate.ts                migration runner
   migrations/0000_*.sql         generated, reviewable
 
-packages/providers/transak/
-  src/checkout.ts               hosted-checkout URL builder
-  src/webhook.ts                signature verification, status mapping
+packages/providers/stripe-onramp/
+  src/mapping.ts                currency/network/status translation
+  src/session.ts                onramp session create + retrieve
+  src/webhook.ts                signature verification, event parsing
 
 scripts/smoke.mjs               15 end-to-end assertions
 scripts/erasure-check.mjs       12 erasure assertions
@@ -104,9 +108,12 @@ order complete. Verification handles the three things that actually break:
   forever.
 - **constant-time compare** — `===` leaks a signature byte by byte.
 
-Both plausible Transak schemes (HMAC header, JWT body) are implemented behind one
-interface, selected by `TRANSAK_WEBHOOK_SCHEME`, because the public docs do not
-pin this down. **Confirm the live scheme and delete the unused branch.**
+Stripe's scheme is documented and singular, so there is one implementation and no
+configuration switch. Two Stripe specifics on top of the general rules: `t` is in
+**seconds**, and the header can carry **several `v1` signatures** while an endpoint
+secret is being rolled — accepting only the first turns every rotation into an
+outage. Schemes other than `v1` (Stripe sends a `v0` on test events) are ignored;
+honouring them would be a downgrade attack.
 
 ### Deduplication is a database constraint
 `provider_events` unique on `(provider, external_event_id)`. Insert first, process
@@ -165,14 +172,18 @@ engineering task.**
 
 **Why first:** this is a binary business risk. Standard on-ramp terms assume
 delivery to the KYC'd payer's *own* wallet. Payer ≠ beneficiary to a corporate
-exchange account is exactly what AML controls flag. If Transak says no, most of
+exchange account is exactly what AML controls flag. If Stripe says no, most of
 the roadmap below is wasted. The original report sequences this in Phase 4 — that
 is backwards.
+
+Stripe adds a second gate ahead of it: onramp access is **application-gated even
+for sandboxes**, and the onramp is available only in the EU and the US, funding
+only from USD and EUR. Confirm the customer geographies before applying.
 
 Sandbox access does **not** answer this. Staging keys are typically self-serve;
 they tell you nothing about whether the model is permitted in production.
 
-**Get answers in writing, from both Transak and Binance:**
+**Get answers in writing, from both Stripe and Binance:**
 
 - [ ] May the payer and the receiving wallet owner be different parties?
 - [ ] May the beneficiary be a corporate entity holding a Binance Entity Account?
@@ -182,8 +193,10 @@ they tell you nothing about whether the model is permitted in production.
 - [ ] **Who bears chargeback liability?** ← the one with real money attached
 - [ ] What sender/beneficiary information must accompany each transfer (Travel Rule)?
 
-**Also confirm the webhook signing scheme** while you have their attention — it
-decides which branch of `packages/providers/transak/src/webhook.ts` survives.
+**Also confirm the settlement asset** while you have their attention. Stripe's
+published availability table lists USDC (Polygon) but not USDT, even though `usdt`
+is in the API's currency enum — the storefront defaults to USDC for that reason.
+And confirm where Stripe's merchant-of-record dispute liability ends.
 
 **Done when:** written confirmation on file naming the entity, asset, network and
 geographies. Record it in `docs/provider-approval.md`.
@@ -205,7 +218,7 @@ Four jobs, all idempotent, all safe to run concurrently:
 
 | Job | Interval | Behaviour |
 |---|---|---|
-| `pollStalledOrders` | 5 min | For orders non-terminal past `DWELL_TIMEOUT_MS[status]`, call Transak's order-status API and apply the result through the *same* transition path as a webhook. |
+| `pollStalledOrders` | 5 min | For orders non-terminal past `DWELL_TIMEOUT_MS[status]`, call `retrieveOnrampSession(cfg, order.providerOrderId)` — already implemented — and apply the result through the *same* transition path as a webhook. `parseOnrampEvent()` accepts a bare session object precisely so this path produces the same shape as the webhook path. |
 | `retryFailedEvents` | 2 min | `provider_events WHERE processed_at IS NULL AND attempts < 10` — re-drive `WebhooksService.process()`. Exponential backoff on `attempts`. |
 | `drainOutbox` | 30 s | `outbox WHERE published_at IS NULL AND available_at <= now()` — dispatch, set `published_at`. Backoff and dead-letter after N attempts. |
 | `sweepRetention` | daily | `sweepExpiredSubjects()` — already implemented in `packages/database/src/erasure.ts`. |
@@ -268,7 +281,7 @@ reachable — including a demo URL.
 - [ ] A destination is unusable before `active_from`.
 - [ ] Admin login without 2FA is refused.
 
-> **Leave `/webhooks/transak` unauthenticated.** It is authenticated by signature.
+> **Leave `/webhooks/stripe` unauthenticated.** It is authenticated by signature.
 > Do not put an API-key check in front of it.
 
 ---
@@ -306,8 +319,11 @@ between quote and delivery is a dispute waiting to happen.
 
 ### Build
 
-- Fetch a Transak quote at order creation; persist `quote_id`, `crypto_amount_quoted`,
-  `quote_expires_at`.
+- Fetch a quote at order creation via `GET /v1/crypto/onramp/quotes`; persist
+  `quote_id`, `crypto_amount_quoted`, `quote_expires_at`. Note Stripe's quote
+  response carries `source_total_amount` and a `fees` breakdown
+  (`network_fee_monetary`, `transaction_fee_monetary`) — the fee split is what the
+  customer will ask about, so surface it rather than only the net.
 - Reject checkout on an expired quote; require re-quote.
 - Show the fee breakdown and the rate explicitly at checkout.
 - On settlement, store `crypto_amount_settled` and record the delta.

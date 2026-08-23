@@ -18,6 +18,10 @@ export async function GET(
       fiatCurrency: order.fiatCurrency,
       cryptoAsset: order.cryptoAsset,
       network: order.network,
+      // What actually settled, once a verified webhook says so. The on-chain
+      // transaction hash is deliberately NOT projected here: it resolves to the
+      // merchant's deposit address, which is not the customer's to publish.
+      cryptoAmountSettled: order.cryptoAmountSettled,
     });
   } catch (err) {
     if (err instanceof PaymentApiError) {

@@ -15,6 +15,22 @@ interface CheckoutRequestBody {
   idempotencyKey?: unknown;
 }
 
+/**
+ * The payer's IP, for Stripe's supportability check.
+ *
+ * Taken from the proxy headers rather than the body: a client-supplied IP would
+ * let anyone claim a supported country. Only the first hop in `x-forwarded-for`
+ * is used, and only when a trusted proxy actually sets it.
+ */
+function clientIp(req: Request): string | undefined {
+  const forwarded = req.headers.get("x-forwarded-for");
+  const candidate = forwarded?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? undefined;
+  if (!candidate) return undefined;
+  // Loopback tells Stripe nothing and trips its malformed-address validation.
+  if (candidate === "::1" || candidate.startsWith("127.")) return undefined;
+  return candidate;
+}
+
 export async function POST(req: Request): Promise<Response> {
   let body: CheckoutRequestBody;
   try {
@@ -68,6 +84,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const customerEmail = typeof body.customerEmail === "string" && body.customerEmail ? body.customerEmail : undefined;
+  const customerIpAddress = clientIp(req);
 
   try {
     const order = await createOrder({
@@ -75,16 +92,30 @@ export async function POST(req: Request): Promise<Response> {
       fiatCurrency: currency as FiatCurrency,
       cryptoAsset: cryptoOption.asset as CryptoAsset,
       network: cryptoOption.network as ChainNetwork,
-      customerEmail,
+      ...(customerEmail ? { customerEmail } : {}),
+      ...(customerIpAddress ? { customerIpAddress } : {}),
       idempotencyKey,
     });
 
-    // Only what the client needs to proceed - the full gateway response
-    // (status, timestamps, internal fields) is not the frontend's concern.
-    return NextResponse.json({ reference: order.reference, checkoutUrl: order.checkoutUrl });
+    // Only the reference and where to go next. The onramp client secret stays
+    // on the server: the payment page fetches its own, server-side, at render.
+    return NextResponse.json({
+      reference: order.reference,
+      checkoutUrl:
+        order.onramp?.mode === "hosted" && order.checkoutUrl
+          ? order.checkoutUrl
+          : `/checkout/onramp/${encodeURIComponent(order.reference)}`,
+    });
   } catch (err) {
     if (err instanceof PaymentApiError) {
-      return NextResponse.json({ error: "Unable to create order" }, { status: err.status >= 500 ? 502 : 400 });
+      // The gateway's 400s are customer-actionable ("not available in your
+      // country", "currency not supported") and worth passing through verbatim;
+      // everything else stays generic.
+      const message =
+        err.status === 400 && typeof (err.body as { message?: unknown } | undefined)?.message === "string"
+          ? ((err.body as { message: string }).message)
+          : "Unable to create order";
+      return NextResponse.json({ error: message }, { status: err.status >= 500 ? 502 : 400 });
     }
     throw err;
   }

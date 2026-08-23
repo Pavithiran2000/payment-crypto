@@ -26,11 +26,21 @@ export class OrdersController {
 
   /**
    * Status is read from our record, which is only ever advanced by a verified
-   * webhook. The browser's return from the hosted checkout is a navigation
-   * event, not a source of truth - it never marks an order complete.
+   * webhook. The browser's return from the onramp is a navigation event, not a
+   * source of truth - it never marks an order complete.
    */
   @Get(':reference')
   async get(@Param('reference') reference: string) {
     return this.orders.findByReference(reference);
+  }
+
+  /**
+   * Separate from the order projection so a client secret is only ever served
+   * to a caller that explicitly asked for one, and only while the order is
+   * still payable.
+   */
+  @Get(':reference/onramp-session')
+  async onrampSession(@Param('reference') reference: string) {
+    return this.orders.findOnrampHandle(reference);
   }
 }

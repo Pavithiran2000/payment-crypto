@@ -68,6 +68,7 @@ export function CheckoutForm({ product, price, currency, quantity }: { product: 
           If you are not redirected automatically,{" "}
           <a href={checkoutUrl}>click here to continue</a>.
         </p>
+        <p className="secure-note">Your order has been created &mdash; it is safe to retry this link.</p>
       </section>
     );
   }
@@ -144,7 +145,7 @@ export function CheckoutForm({ product, price, currency, quantity }: { product: 
             <span>3</span>
             <div>
               <h2>Payment method</h2>
-              <p>Pay by card - your payment is converted to crypto and settled to our custodial wallet.</p>
+              <p>Pay by card. Our payment partner handles the card details and identity checks - this site never sees them - and settles to our custodial wallet.</p>
             </div>
           </div>
           <div className="payment-options">
@@ -210,7 +211,7 @@ export function CheckoutForm({ product, price, currency, quantity }: { product: 
         <button className="btn checkout-btn" type="submit" disabled={submitting || !cryptoChoice}>
           {submitting ? "Starting checkout…" : "Place Order　→"}
         </button>
-        <p className="secure-note">By placing the order, you will be redirected to our secure payment partner to complete payment.</p>
+        <p className="secure-note">By placing the order, you will be taken to our secure payment step. Your card details are entered into our payment partner&apos;s form, never into this site.</p>
         <Link className="edit-order" href={`/products/${product.slug}`}>
           ← Edit price or currency
         </Link>

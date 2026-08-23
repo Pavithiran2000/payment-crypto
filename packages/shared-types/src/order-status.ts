@@ -113,12 +113,22 @@ const MAIN_SEQUENCE: readonly OrderStatus[] = [
   'COMPLETED',
 ];
 
-/** Edges off the happy path. Every one is deliberate and enumerated. */
+/**
+ * Edges off the happy path. Every one is deliberate and enumerated.
+ *
+ * `KYC_FAILED` is reachable from every pre-settlement state, not only from
+ * `KYC_PENDING`. On a provider that screens the payer inside its own hosted
+ * flow (Stripe onramp: one `rejected` status covering KYC failure, sanctions
+ * screening and fraud checks) we never observe a `KYC_PENDING` of our own -
+ * the rejection lands directly on whatever state the order was in. Requiring
+ * `KYC_PENDING` first would route every legitimately-rejected payer to
+ * MANUAL_REVIEW instead of recording why they were declined.
+ */
 const ALLOWED: Record<OrderStatus, readonly OrderStatus[]> = {
-  CREATED: ['CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
-  CHECKOUT_OPENED: ['CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
+  CREATED: ['KYC_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
+  CHECKOUT_OPENED: ['KYC_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
   KYC_PENDING: ['KYC_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
-  PAYMENT_PENDING: ['CARD_DECLINED', 'PAYMENT_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
+  PAYMENT_PENDING: ['KYC_FAILED', 'CARD_DECLINED', 'PAYMENT_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
   PAYMENT_CONFIRMED: ['CONVERSION_FAILED', 'MANUAL_REVIEW', 'DISPUTED'],
   CRYPTO_CONVERTED: ['CRYPTO_TRANSFER_FAILED', 'MANUAL_REVIEW', 'DISPUTED'],
   CRYPTO_SENT: ['CRYPTO_TRANSFER_FAILED', 'MANUAL_REVIEW', 'DISPUTED'],

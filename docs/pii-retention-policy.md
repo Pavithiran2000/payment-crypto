@@ -24,7 +24,7 @@ request covering AML-scope data is **not deletion and not refusal — it is
 restriction of processing** until the retention window closes, then deletion.
 
 **Second — and more important here — we are not the AML-obligated entity for the
-payer.** Transak performs payer KYC and owns that record. Sumsub holds merchant
+payer.** Stripe performs payer KYC and owns that record. Sumsub holds merchant
 KYB documents. If we never hold the data, we never have the conflict.
 
 The policy therefore has two halves: hold almost nothing, and make what we do
@@ -39,8 +39,8 @@ hold erasable without touching the financial record.
 | **0 — Financial** | order id, amounts, currency, asset, network, status, timestamps, provider order id, chain tx hash | `orders`, `order_status_history`, `provider_events` | **10 years** | **No.** Contains no PII by construction. |
 | **1 — Contact PII** | customer email, IP, country | `orders.customer_email_enc` (ciphertext) | 5 years (`AML_RETENTION_DAYS`) | **Yes** — via key destruction |
 | **2 — KYB reference** | Sumsub applicant id, status, decision date | `merchants` | 5 years after relationship ends | No — pseudonymous reference only |
-| **3 — Payer KYC documents** | identity documents, selfies, DOB, address | **Transak. Never us.** | n/a | n/a |
-| **4 — Card data** | PAN, CVV, expiry | **Transak. Never us.** | n/a | n/a |
+| **3 — Payer KYC documents** | identity documents, selfies, DOB, address, SSN | **Stripe. Never us.** | n/a | n/a |
+| **4 — Card data** | PAN, CVV, expiry | **Stripe. Never us.** | n/a | n/a |
 
 **Tier 3 and 4 never enter our systems.** This is the single most valuable line in
 the policy — it is what keeps us out of PCI-DSS scope beyond SAQ-A and out of the
@@ -188,5 +188,5 @@ confirm with counsel:
 2. Confirm the blind index surviving erasure is acceptable in your DPA/privacy notice.
 3. Confirm the 10-year Tier 0 retention against local financial-records rules.
 4. Confirm whether the platform is a data controller or processor for payer contact
-   data given Transak is the KYC-obligated party. This changes who answers the
+   data given Stripe is the KYC-obligated party and the merchant of record. This changes who answers the
    erasure request, and it should be answered before the first live payer exists.

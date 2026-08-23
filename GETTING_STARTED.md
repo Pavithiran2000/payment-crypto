@@ -9,8 +9,9 @@ end. Written assuming you have never run this project before.
 
 Two apps talk to each other:
 
-- **`apps/api`** (NestJS, port `3000`) — the payment gateway. Creates orders, builds a Transak
-  checkout link, and listens for Transak's signed webhook to know when a payment actually happened.
+- **`apps/api`** (NestJS, port `3000`) — the payment gateway. Creates orders, mints a Stripe
+  fiat-to-crypto onramp session, and listens for Stripe's signed webhook to know when a payment
+  actually happened.
 - **`apps/web`** (Next.js, port `3001`) — the storefront. Its server-side code (never the browser)
   calls `apps/api` to create orders and check status.
 
@@ -34,8 +35,8 @@ password you set for the `postgres` superuser during install.
 
 ## 3. Credentials & secrets you need to gather
 
-Nothing here talks to real money. Everything below is either generated locally or a **free
-Transak sandbox/staging** credential — there is no cost and no live financial risk.
+Nothing here talks to real money. Everything below is either generated locally or a **Stripe
+sandbox** credential — there is no cost and no live financial risk.
 
 ### 3.1 Database credentials (yours — you already set these)
 
@@ -52,24 +53,33 @@ Whatever you chose when installing Postgres locally:
 > If your local Postgres runs on the default port `5432`, use `5432` instead of `5433` — just
 > keep `DATABASE_URL` in `.env` consistent with whatever your server is actually listening on.
 
-### 3.2 Transak sandbox API credentials (free signup, no real money)
+### 3.2 Stripe sandbox credentials (approval required, no real money)
 
-Transak is the card→crypto provider. To exercise the **real** hosted checkout flow (optional —
-the automated smoke test below does **not** need this), sign up for a free sandbox account:
+Stripe's fiat-to-crypto onramp is the card→crypto provider. Unlike an ordinary Stripe
+integration it is **access-gated: you must be approved before the API works at all, including
+in a sandbox.**
 
-1. Go to Transak's partner/developer dashboard and register for a **Staging** (sandbox)
-   account — this is a standard developer signup, not a live merchant account.
-2. Once approved, the dashboard gives you:
-   - **API Key** → `TRANSAK_API_KEY`
-   - **API Secret** → `TRANSAK_API_SECRET` (also used to verify/sign webhooks)
-3. You do **not** need a real card or real crypto wallet — Transak's staging environment uses
-   test cards and test KYC.
+1. Create or sign in to a Stripe account and complete account onboarding.
+2. Submit the onramp application at
+   <https://dashboard.stripe.com/crypto-onramp/get-started>. Stripe reviews most applications
+   within 48 hours.
+3. Once approved, take the keys from <https://dashboard.stripe.com/apikeys>:
+   - **Secret key** (`sk_test_...`) → `STRIPE_SECRET_KEY`
+   - **Publishable key** (`pk_test_...`) → `STRIPE_PUBLISHABLE_KEY`
+4. Create a webhook endpoint subscribed to `crypto.onramp_session.updated`, or run
+   `stripe listen --forward-to localhost:3000/webhooks/stripe`. Either way you get a
+   `whsec_...` signing secret → `STRIPE_ONRAMP_WEBHOOK_SECRET`. **That is a different secret
+   from the API key, and the `stripe listen` one differs from a Dashboard endpoint's.**
 
-If you only want to run the automated tests (`pnpm smoke`), you can leave
-`TRANSAK_API_KEY`/`TRANSAK_API_SECRET` as the placeholder dummy values already in `.env` — the
-smoke test signs its own fake webhooks using whatever secret is in `.env`, so it works without a
-real Transak account. You only need real Transak credentials to click through an actual hosted
-checkout page in a browser.
+**You do not need any of this to run the project.** `.env` ships with `STRIPE_API_BASE_URL`
+pointing at `scripts/stripe-stub.mjs`, a local stand-in for `POST /v1/crypto/onramp_sessions`.
+Order creation, session parameters, webhook verification and every state transition run for
+real against it; only Stripe's own payment UI is missing. `pnpm smoke` starts the stub itself.
+Delete `STRIPE_API_BASE_URL` once you have real keys — the API refuses that override outright
+if the secret key is a live one.
+
+Sandbox test values, once you do have access: OTP `000000`, SSN `000000000`, address line 1
+`address_full_match`, card `4242424242424242`.
 
 ### 3.3 Secrets you generate yourself (no signup needed)
 
@@ -108,11 +118,12 @@ DB_SSL=false
 PII_MASTER_KEK=<generated in 3.3>
 PII_BLIND_INDEX_PEPPER=<generated in 3.3>
 
-TRANSAK_ENV=staging
-TRANSAK_API_KEY=<from 3.2, or leave dummy value for smoke-test-only>
-TRANSAK_API_SECRET=<from 3.2, or leave dummy value for smoke-test-only>
-TRANSAK_REDIRECT_URL=http://localhost:3001/checkout/return
-TRANSAK_WEBHOOK_SCHEME=hmac-header
+STRIPE_SECRET_KEY=<from 3.2, or leave the placeholder for stub-only work>
+STRIPE_PUBLISHABLE_KEY=<from 3.2, or leave the placeholder for stub-only work>
+STRIPE_ONRAMP_WEBHOOK_SECRET=<from 3.2; the smoke test signs with whatever is here>
+STRIPE_ONRAMP_MODE=embedded
+STRIPE_API_BASE_URL=http://127.0.0.1:4599   # delete once you have real keys
+WEB_BASE_URL=http://localhost:3001
 
 AML_RETENTION_DAYS=1825
 PORT=3000
@@ -190,7 +201,7 @@ Leave both running for the rest of this guide.
 
 ## 6. Testing — two levels
 
-### 6.1 Automated smoke test (no browser, no real Transak account needed)
+### 6.1 Automated smoke test (no browser, no Stripe account needed)
 
 With `apps/api` running (Terminal 1 above), in a third terminal:
 
@@ -202,7 +213,8 @@ This exercises 15 real guarantees against the running API: order creation, idemp
 key → same order, no duplicate), webhook signature verification (valid vs. tampered vs. expired
 timestamp), duplicate webhook delivery (safe no-op), out-of-order/backwards transitions (rejected),
 and the full happy-path status progression — all using self-signed fake webhooks, so it needs
-nothing from Transak's actual servers.
+nothing from Stripe's actual servers — the suite signs its own events and starts its own stub
+of the session API.
 
 Also worth running:
 
@@ -220,23 +232,23 @@ With both `pnpm api:dev` and `pnpm web:dev` running:
 1. Open `http://localhost:3001`.
 2. Browse to a product, enter your own quote price and quantity (this storefront is
    custom-quote — there's no fixed catalog price).
-3. Proceed to checkout, fill in contact/billing details, and select **USDT (Polygon)** (currently
-   the only payment option — it's the only payout destination seeded in 5.3).
-4. Submit. You should be redirected to a Transak-hosted checkout URL.
-   - With **dummy Transak credentials**, this redirect will fail to load a real checkout page
-     (Transak will reject the fake API key) — that's expected; you've still verified
-     `apps/web → apps/api → order created → checkoutUrl returned` correctly.
-   - With **real Transak staging credentials** (from step 3.2), you'll land on an actual sandbox
-     checkout page and can complete it with Transak's documented test card numbers.
+3. Proceed to checkout, fill in contact/billing details, and select **USDC (Polygon)** (currently
+   the only payment option — see 5.3 and `apps/web/src/lib/payment-config.ts`).
+4. Submit. You land on `/checkout/onramp/<reference>` — **our own page**, which fetches the
+   session's `client_secret` server-side and mounts Stripe's widget in an iframe.
+   - Against the **stub**, Stripe's scripts load and the widget mounts, but the session id is
+     not one Stripe knows, so the frame shows an error instead of a payment form. That is
+     expected, and everything either side of it has still been exercised.
+   - With **real sandbox credentials**, you get a working onramp and can complete it with the
+     test values in 3.2.
 5. Watch order status live at `http://localhost:3001/orders/<reference>` — it polls every 4
-   seconds and only changes when a **real, signature-verified webhook** arrives from Transak
-   (the redirect back to your site does *not* by itself change the status — that's intentional).
+   seconds and only changes when a **real, signature-verified webhook** arrives from Stripe.
+   The widget's own completion event navigates you there but never marks the order paid.
 
-If you don't have a public URL for Transak's staging environment to send webhooks to your
-local machine, use a tunnel tool (e.g. `ngrok http 3000`) and set the webhook destination URL in
-your Transak dashboard to `https://<your-ngrok-subdomain>.ngrok.io/webhooks/transak`. This is
-only needed to see live status updates from a real Transak sandbox checkout — the automated
-`pnpm smoke` test (6.1) already proves the webhook logic works without any tunnel.
+Stripe cannot reach `localhost`. To see live status from a real sandbox checkout, run
+`stripe listen --forward-to localhost:3000/webhooks/stripe` and put the `whsec_` it prints into
+`STRIPE_ONRAMP_WEBHOOK_SECRET`. This is only needed for a real sandbox checkout — `pnpm smoke`
+(6.1) already proves the webhook logic without any tunnel.
 
 ---
 
@@ -247,9 +259,10 @@ only needed to see live status updates from a real Transak sandbox checkout — 
 | `pnpm db:migrate` fails to connect | `DATABASE_URL` in `.env` doesn't match your actual Postgres host/port/user/password |
 | `psql: FATAL: database "payment_platform" does not exist` | Skipped step 5.2 |
 | API returns `401 Missing X-API-Key` | `PAYMENT_API_KEY` differs between `.env` and `apps/web/.env.local` |
-| Checkout says "No approved and active payout destination" | `pnpm db:seed` wasn't run, or you're using a merchant/asset/network combo other than the seeded one (USDT/polygon) |
-| Order status never leaves `CREATED`/`CHECKOUT_OPENED` | No webhook has arrived yet — either you're using dummy Transak credentials (no real checkout happened), or Transak can't reach your webhook URL (see the ngrok note above) |
-| `pnpm smoke` fails on webhook checks | `TRANSAK_API_SECRET` in `.env` isn't set, or the API wasn't restarted after changing `.env` |
+| Checkout says "No approved and active payout destination" | `pnpm db:seed` wasn't run, or you're using a merchant/asset/network combo other than the seeded ones (USDC/polygon, USDT/polygon) |
+| Order status never leaves `CREATED`/`CHECKOUT_OPENED` | No webhook has arrived yet — either you're on the stub (no real checkout happened), or Stripe can't reach your webhook URL (see the `stripe listen` note above) |
+| `pnpm smoke` fails on webhook checks | `STRIPE_ONRAMP_WEBHOOK_SECRET` in `.env` isn't set, or the API wasn't restarted after changing `.env` |
+| Order creation fails with `ECONNREFUSED` | `STRIPE_API_BASE_URL` points at the stub but the stub isn't running — `node scripts/stripe-stub.mjs` |
 
 ---
 
@@ -262,4 +275,4 @@ only needed to see live status updates from a real Transak sandbox checkout — 
 - [ ] `pnpm install && pnpm db:migrate && pnpm db:seed && pnpm build`
 - [ ] `pnpm api:dev` and `pnpm web:dev` both running
 - [ ] `pnpm smoke` passes
-- [ ] (optional) real Transak staging credentials obtained, manual browser checkout completed
+- [ ] (optional) Stripe onramp application approved, sandbox keys in place, manual browser checkout completed

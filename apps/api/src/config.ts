@@ -1,4 +1,8 @@
-import type { TransakConfig, VerificationScheme } from '@pp/provider-transak';
+import {
+  STRIPE_API_BASE_URL,
+  type StripeOnrampConfig,
+  type OnrampMode,
+} from '@pp/provider-stripe-onramp';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -8,8 +12,13 @@ function required(name: string): string {
 
 export interface AppConfig {
   port: number;
-  transak: TransakConfig;
-  webhookScheme: VerificationScheme;
+  stripe: StripeOnrampConfig;
+  /**
+   * Base URL of the storefront that mounts the embedded onramp widget. The
+   * checkout URL handed back with a new order is built from this, so the
+   * customer stays on our domain for the whole payment.
+   */
+  webBaseUrl: string;
   /** Retention window for contact PII, in days. See docs/pii-retention-policy.md. */
   amlRetentionDays: number;
   /** Shared secret required as X-API-Key on /orders*. Checked by ApiKeyGuard. */
@@ -23,25 +32,30 @@ export function loadConfig(): AppConfig {
   required('PII_MASTER_KEK');
   required('PII_BLIND_INDEX_PEPPER');
 
-  const env = required('TRANSAK_ENV');
-  if (env !== 'staging' && env !== 'production') {
-    throw new Error('TRANSAK_ENV must be "staging" or "production"');
+  const mode = process.env['STRIPE_ONRAMP_MODE'] ?? 'embedded';
+  if (mode !== 'embedded' && mode !== 'hosted') {
+    throw new Error('STRIPE_ONRAMP_MODE must be "embedded" or "hosted"');
   }
 
-  const scheme = process.env['TRANSAK_WEBHOOK_SCHEME'] ?? 'hmac-header';
-  if (scheme !== 'hmac-header' && scheme !== 'jwt-body') {
-    throw new Error('TRANSAK_WEBHOOK_SCHEME must be "hmac-header" or "jwt-body"');
+  const secretKey = required('STRIPE_SECRET_KEY');
+  const apiBaseUrl = process.env['STRIPE_API_BASE_URL'] ?? STRIPE_API_BASE_URL;
+
+  // A live key pointed at anything but Stripe means either a misconfiguration
+  // or an exfiltration attempt. Neither should be allowed to reach a request.
+  if (secretKey.startsWith('sk_live_') && apiBaseUrl !== STRIPE_API_BASE_URL) {
+    throw new Error('STRIPE_API_BASE_URL may not be overridden with a live secret key');
   }
 
   return {
     port: Number(process.env['PORT'] ?? 3000),
-    transak: {
-      env,
-      apiKey: required('TRANSAK_API_KEY'),
-      apiSecret: required('TRANSAK_API_SECRET'),
-      redirectUrl: required('TRANSAK_REDIRECT_URL'),
+    stripe: {
+      secretKey,
+      publishableKey: required('STRIPE_PUBLISHABLE_KEY'),
+      webhookSecret: required('STRIPE_ONRAMP_WEBHOOK_SECRET'),
+      mode: mode as OnrampMode,
+      apiBaseUrl,
     },
-    webhookScheme: scheme,
+    webBaseUrl: (process.env['WEB_BASE_URL'] ?? 'http://localhost:3001').replace(/\/+$/, ''),
     amlRetentionDays: Number(process.env['AML_RETENTION_DAYS'] ?? 1825),
     apiKey: required('PAYMENT_API_KEY'),
   };

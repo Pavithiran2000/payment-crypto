@@ -11,6 +11,14 @@ export class PaymentApiError extends Error {
   }
 }
 
+/** What the browser needs to mount Stripe's onramp widget. */
+export interface OnrampHandle {
+  sessionId: string;
+  clientSecret: string;
+  publishableKey: string;
+  mode: "embedded" | "hosted";
+}
+
 export interface OrderResponse {
   reference: string;
   status: string;
@@ -18,7 +26,10 @@ export interface OrderResponse {
   fiatCurrency: string;
   cryptoAsset: string;
   network: string;
+  cryptoAmountSettled: string | null;
+  chainTxHash: string | null;
   checkoutUrl?: string;
+  onramp?: OnrampHandle;
   createdAt: string;
 }
 
@@ -29,6 +40,8 @@ export interface CreateOrderInput {
   network: ChainNetwork;
   customerEmail?: string;
   customerCountry?: string;
+  /** Lets Stripe reject an unsupported geography before the customer commits. */
+  customerIpAddress?: string;
   idempotencyKey: string;
 }
 
@@ -71,4 +84,17 @@ export function createOrder(input: CreateOrderInput): Promise<OrderResponse> {
 
 export function getOrder(reference: string): Promise<OrderResponse> {
   return request<OrderResponse>(`/orders/${encodeURIComponent(reference)}`, { method: "GET" });
+}
+
+/**
+ * Fetched server-side, immediately before rendering the onramp page.
+ *
+ * The client secret reaches the browser only inside that one page's props, and
+ * only while the order is still payable - the gateway 404s a terminal order.
+ * It is never exposed through the public order-status route.
+ */
+export function getOnrampHandle(reference: string): Promise<OnrampHandle> {
+  return request<OnrampHandle>(`/orders/${encodeURIComponent(reference)}/onramp-session`, {
+    method: "GET",
+  });
 }

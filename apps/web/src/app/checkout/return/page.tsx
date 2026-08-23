@@ -6,13 +6,17 @@ import { Footer, Header } from "@/components/site-shell";
 export const metadata: Metadata = { title: "Processing your payment" };
 
 /**
- * Landing target for TRANSAK_REDIRECT_URL - a single static URL shared by
- * every order (checkout.ts sets it from one config value, there is no
- * per-order substitution). Transak appends its own query params identifying
- * the order; which key holds our reference is UNCONFIRMED against the actual
- * Transak account/environment (see docs/PAYMENT_INTEGRATION_PLAN.md §7.2) -
- * this checks the commonly documented ones and degrades gracefully if none
- * are present, since a botched redirect must never be read as "not paid".
+ * A soft landing, not part of the normal flow.
+ *
+ * The embedded onramp keeps the customer on `/checkout/onramp/[reference]` and
+ * moves them to the order page itself, so nothing routes here. It is kept for
+ * two cases that do happen: a bookmark from the old hosted-redirect flow, and
+ * the Stripe-hosted standalone page, which accepts no return URL at all - a
+ * customer who finds their own way back needs somewhere sensible to land.
+ *
+ * Which query key would carry a reference is unknowable in advance, so this
+ * checks the plausible ones and degrades gracefully. A botched return must
+ * never be read as "not paid".
  */
 export default async function CheckoutReturn({
   searchParams,
@@ -20,7 +24,7 @@ export default async function CheckoutReturn({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const query = await searchParams;
-  const candidateKeys = ["partnerOrderId", "orderId", "reference"];
+  const candidateKeys = ["reference", "partner_order_id", "partnerOrderId", "orderId"];
   let reference: string | undefined;
   for (const key of candidateKeys) {
     const value = query[key];
