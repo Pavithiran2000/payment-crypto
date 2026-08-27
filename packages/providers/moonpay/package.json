@@ -1,5 +1,5 @@
 {
-  "name": "@pp/provider-transak",
+  "name": "@pp/provider-moonpay",
   "version": "0.1.0",
   "private": true,
   "type": "module",

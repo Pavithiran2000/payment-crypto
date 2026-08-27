@@ -1,15 +1,15 @@
-# Card Payment to Indian Crypto Wallet  
-## Simple Technical Report — Transak Enterprise → ZebPay Corporate
+# Card Payment to Crypto Wallet  
+## Simple Technical Report — Transak Enterprise → Binance Entity Account
 
 **Project type:** Card-funded fiat-to-crypto payment platform  
-**Main providers:** Transak Enterprise and ZebPay Corporate  
+**Main providers:** Transak Enterprise and Binance (Entity Account)  
 **Development mode:** Sandbox first, then controlled live pilot  
 
 ---
 
 ## 1. Introduction
 
-The purpose of this project is to allow a customer from a supported country to pay using a credit or debit card. Transak will process the card payment, complete customer KYC/AML checks, convert the fiat amount into crypto, and send the crypto to an approved ZebPay Corporate account or wallet in India.
+The purpose of this project is to allow a customer from a supported country to pay using a credit or debit card. Transak will process the card payment, complete customer KYC/AML checks, convert the fiat amount into crypto, and send the crypto to an approved Binance Entity Account.
 
 Your platform will not handle card details, hold customer money, convert fiat into crypto, or store crypto private keys. It will only create orders, open the Transak checkout, receive payment updates, store transaction records, send notifications, and create a blockchain audit proof.
 
@@ -26,7 +26,7 @@ Card Payment + KYC/AML
    ↓
 Fiat-to-Crypto Conversion
    ↓
-ZebPay Corporate Wallet
+Binance Entity Account
    ↓
 Webhook to Your Platform
    ↓
@@ -43,7 +43,7 @@ The system must:
 - use Transak Hosted Checkout;
 - allow Transak to complete customer KYC/AML;
 - convert fiat into an approved crypto asset;
-- send the crypto to an approved ZebPay Corporate destination;
+- send the crypto to an approved Binance Entity Account destination;
 - receive signed Transak webhooks;
 - store transaction details in PostgreSQL;
 - send email notifications using Brevo; and
@@ -58,15 +58,15 @@ The required live flow is:
 ```text
 Customer A pays with Customer A's card
                ↓
-Crypto is delivered to Company B's ZebPay Corporate account
+Crypto is delivered to Company B's Binance Entity Account
 ```
 
 This is not a normal personal crypto purchase flow.
 
-Before live implementation, Transak and ZebPay must confirm in writing that they support:
+Before live implementation, Transak and Binance must confirm in writing that they support:
 
 1. the payer and receiving wallet owner being different;
-2. an Indian corporate beneficiary;
+2. a corporate beneficiary (Binance Entity Account);
 3. payments from multiple international customers;
 4. the selected crypto and network;
 5. required sender and beneficiary information;
@@ -101,7 +101,7 @@ A successful sandbox test does not mean the live business model is approved.
 └───────────────┬───────────────┘
                 ↓
 ┌───────────────────────────────┐
-│ ZebPay Corporate Account      │
+│ Binance Entity Account        │
 │ Receives approved crypto      │
 └───────────────┬───────────────┘
                 ↓
@@ -133,7 +133,7 @@ A successful sandbox test does not mean the live business model is approved.
 | Email | Brevo Transactional Email API |
 | Customer KYC | Transak |
 | Merchant KYB | Sumsub |
-| Indian VDA | ZebPay Corporate |
+| VDA custodian | Binance Entity Account |
 | Blockchain test | Polygon Amoy |
 | Blockchain live | Polygon PoS |
 | Hosting | Render, Railway, AWS, Azure or another managed platform |
@@ -160,7 +160,6 @@ payment-platform/
 │   ├── shared-types/        # Shared TypeScript models
 │   ├── database/            # PostgreSQL schema and access
 │   ├── transak/             # Transak integration
-│   ├── zebpay/              # ZebPay integration
 │   ├── sumsub/              # Merchant KYB integration
 │   ├── brevo/               # Email integration
 │   └── blockchain/          # Polygon audit-hash integration
@@ -176,7 +175,9 @@ payment-platform/
 Web/Admin → API contracts and shared types
 API       → domain logic and provider packages
 Domain    → must not directly depend on provider SDKs
-Providers → Transak, ZebPay, Sumsub, Brevo and Polygon only
+Providers → Transak, Sumsub, Brevo and Polygon only
+          → Binance is not a called API: it is only an allow-listed deposit
+            address stored in payout_destinations (see 6.4)
 Database  → backend access only; never frontend access
 ```
 
@@ -220,11 +221,22 @@ Your backend must:
 - save the blockchain transaction hash; and
 - send the customer or merchant notification.
 
-### 6.4 ZebPay destination
+### 6.4 Binance destination
+
+The receiving custodian is **Binance**, via a **Binance Entity Account** — Binance's
+corporate/KYB account type. Never a personal Binance account: a personal account is for an
+individual's own trading, and routing continuous, third-party-funded, business-purpose deposits
+through one very likely breaches Binance's personal-account Terms of Service (business use
+through a retail account), independent of any Travel Rule question, and risks account suspension.
+
+The platform never calls a custodian API directly — there is no `packages/binance` webhook/SDK
+integration, and none is planned. The destination is just an allow-listed deposit address (see
+below), which is what makes the custodian swappable by configuration rather than by rebuild. See
+the full field-level requirements in `CLIENT_CREDENTIALS_REQUEST.md` §2.
 
 The system must store:
 
-- ZebPay corporate account reference;
+- Binance Entity Account reference;
 - approved deposit address;
 - selected crypto;
 - selected network;
@@ -233,6 +245,34 @@ The system must store:
 - credited status.
 
 Never store a seed phrase or private key.
+
+**Precondition, per §3:** the live flow requires the payer (the card-paying customer) and the
+beneficiary (your Binance Entity Account) to be different parties. This needs **written
+confirmation from both Transak and Binance** that they support that model for your account before
+any live traffic is pointed at it.
+
+**Considerations specific to Binance:**
+
+- **Travel Rule screening on every deposit.** Binance participates in the Global Travel Rule (GTR)
+  Alliance and checks incoming transfers for FATF-required originator/beneficiary data. Because
+  every deposit in this flow is customer-paid but corporate-owned, every single transaction is a
+  potential originator/beneficiary mismatch — not an occasional edge case. Binance's own support
+  documentation states that if Travel Rule information is missing or unverifiable, "users may be
+  asked to provide sender information, and if it is not provided, access to the received crypto
+  may be restricted or denied."
+- **Screening/hold risk at volume.** Binance's post-2023 enhanced KYT (Know Your Transaction)
+  monitoring routes flagged deposits into manual review, which can extend to weeks for larger or
+  more complex exposures. This is an operational risk this platform's "confirm quickly via
+  webhook" design does not currently account for.
+- **Confirm which Binance legal entity holds the account** and under which jurisdiction's terms —
+  Binance is registered with India's FIU-IND as a Reporting Entity (AML reporting), which is not
+  RBI/SEBI licensing; Binance itself states user funds are not bank-protected. This affects dispute
+  resolution and asset recovery if something goes wrong.
+
+**Recommendation:** do not go live without (1) a Binance Entity Account already approved, (2)
+written confirmation from Transak and Binance supporting the payer≠beneficiary model for that
+account, and (3) a direct answer from Binance on how their Travel Rule/KYT screening will treat
+recurring Transak-originated corporate deposits at expected volume.
 
 ### 6.5 Merchant KYB
 
@@ -332,7 +372,7 @@ audit_records
 - masked wallet address;
 - transaction status;
 - blockchain transaction hash;
-- ZebPay credit status;
+- Binance credit status;
 - provider reference;
 - created time; and
 - completed time.
@@ -431,7 +471,7 @@ For the first MVP, storing one transaction hash at a time is acceptable. Merkle 
 6. Use Transak test card
 7. Receive test payment result
 8. Receive Transak webhook
-9. Simulate ZebPay credit
+9. Simulate Binance credit
 10. Send Brevo test email
 11. Store transaction hash on Polygon Amoy
 12. Show test receipt
@@ -467,9 +507,9 @@ For the first MVP, storing one transaction hash at a time is acceptable. Merkle 
 - blockchain transfer; and
 - payment webhooks.
 
-### ZebPay handles
+### Binance handles
 
-- Indian corporate account;
+- corporate (Entity) account;
 - crypto deposit;
 - crypto custody;
 - compliance review;
@@ -504,31 +544,30 @@ Possible fees include:
 
 The final checkout quote must be shown before payment.
 
-### ZebPay
+### Binance
 
 Possible fees include:
 
-- corporate trading fee;
-- GST on applicable fees;
+- corporate/entity trading fee;
+- applicable local taxes (e.g. GST, TDS, depending on jurisdiction);
 - crypto withdrawal fee;
-- enhanced KYC fee;
-- possible TDS; and
+- enhanced KYC/KYB fee; and
 - account-specific corporate fees.
 
-Receiving crypto may be free, but the corporate contract must confirm the final pricing.
+Receiving crypto may be free, but Binance's corporate terms must confirm the final pricing.
 
 ---
 
 ## 14. Main Limitations
 
-1. Transak and ZebPay must approve the different payer and beneficiary model.
+1. Transak and Binance must approve the different payer and beneficiary model.
 2. Not every country or card will be supported.
 3. The crypto asset and network must match exactly.
 4. A card transaction may be disputed after crypto has been sent.
 5. A provider may delay a transaction for compliance review.
 6. Fees and exchange rates can change.
 7. Sandbox testing does not prove production approval.
-8. ZebPay corporate limits may differ from public retail limits.
+8. Binance Entity Account limits may differ from personal-account retail limits.
 9. The project should start with only one crypto asset and one network.
 10. No live payment should be enabled before legal and provider approval.
 
@@ -548,7 +587,7 @@ Database:        PostgreSQL
 Email:           Brevo
 Customer KYC:    Transak
 Merchant KYB:    Sumsub
-Indian VDA:      ZebPay Corporate
+VDA custodian:   Binance Entity Account
 Audit chain:     Polygon Amoy
 ```
 
@@ -583,7 +622,7 @@ Start with:
 2. Add Transak checkout.
 3. Add Transak webhook verification.
 4. Store transactions.
-5. Add mock ZebPay credit.
+5. Add mock Binance credit.
 6. Show transaction status.
 
 ### Phase 3 — Supporting features
@@ -597,7 +636,7 @@ Start with:
 ### Phase 4 — Live preparation
 
 1. Obtain Transak written approval.
-2. Obtain ZebPay corporate approval.
+2. Obtain Binance Entity Account approval.
 3. Confirm token and network.
 4. Confirm limits and fees.
 5. Complete legal review.
@@ -618,7 +657,7 @@ Customer KYC + Card Processing
       ↓
 Fiat-to-Crypto Conversion
       ↓
-Approved ZebPay Corporate Account
+Approved Binance Entity Account
       ↓
 Verified Webhook
       ↓
@@ -629,7 +668,7 @@ Brevo Receipt + Polygon Audit Hash
 
 Build and demonstrate this in sandbox first. Use a simple TypeScript modular monolith inside the pnpm + Nx monorepo; do not add complex microservices, automatic refunds, multiple providers, multiple crypto networks or advanced blockchain contracts in the first version.
 
-The live system should be activated only after Transak and ZebPay confirm that international customers may fund the Indian corporate beneficiary account.
+The live system should be activated only after Transak and Binance confirm that international customers may fund the corporate (Entity Account) beneficiary.
 
 ---
 
@@ -638,8 +677,8 @@ The live system should be activated only after Transak and ZebPay confirm that i
 - Transak On-Ramp: https://docs.transak.com/products/on-ramp
 - Transak Sandbox: https://docs.transak.com/guides/sandbox-credentials
 - Transak Webhooks: https://docs.transak.com/features/webhooks
-- ZebPay Security: https://zebpay.com/in/features/security
-- ZebPay Pricing: https://zebpay.com/in/features/pricing
+- Binance Entity Verification (KYB): https://www.binance.com/en/support/faq/how-to-complete-entity-verification-kyb-on-binance-step-by-step-guide-360015552032
+- Binance Travel Rule: https://www.binance.com/en/learn/travel-rule
 - Sumsub Business Verification: https://docs.sumsub.com/docs/verify-businesses
 - Brevo Transactional Email: https://developers.brevo.com/docs/send-a-transactional-email
 - Polygon RPC and Network Details: https://docs.polygon.technology/pos/reference/rpc-endpoints

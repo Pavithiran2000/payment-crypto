@@ -17,7 +17,7 @@ for (const line of envText.split(/\r?\n/)) {
 
 const db = await import('../packages/database/dist/index.js');
 const { getDb, closeDb, orders, dataSubjects, eraseSubject, unwrapDek, decryptPii } = db;
-const { eq, desc } = await import('drizzle-orm');
+const { and, desc, eq, isNotNull } = await import('drizzle-orm');
 
 let passed = 0;
 let failed = 0;
@@ -29,15 +29,25 @@ const check = (name, ok, detail = '') => {
 
 const d = getDb();
 
+// A COMPLETED donation, specifically. It is the row that carries BOTH encrypted
+// columns - the contact email and the donor's display name - so erasing one
+// subject has to shred both. An ordinary purchase would leave the donor-name
+// path untested, and an untested erasure path is one that quietly stops working.
 const [order] = await d
   .select()
   .from(orders)
-  .where(eq(orders.status, 'COMPLETED'))
+  .where(
+    and(
+      eq(orders.status, 'COMPLETED'),
+      eq(orders.orderType, 'DONATION'),
+      isNotNull(orders.donorNameEnc),
+    ),
+  )
   .orderBy(desc(orders.createdAt))
   .limit(1);
 
 if (!order) {
-  console.error('No COMPLETED order found. Run scripts/smoke.mjs first.');
+  console.error('No COMPLETED donation with a donor name found. Run scripts/smoke.mjs first.');
   await closeDb();
   process.exit(1);
 }
@@ -52,7 +62,11 @@ const [subjectBefore] = await d
 
 const dek = unwrapDek(subjectBefore.dekWrapped);
 const email = decryptPii(dek, order.customerEmailEnc);
-check('PII decrypts while DEK exists', email === 'payer@example.com', email);
+check('contact PII decrypts while DEK exists', email === 'payer@example.com', email);
+
+const donorName = decryptPii(dek, order.donorNameEnc);
+check('donor name decrypts while DEK exists', donorName === 'A. Donor', donorName);
+check('donation is attributed to a campaign', order.donationCampaign === 'artisan-apprenticeships', String(order.donationCampaign));
 
 // --- retention window must defer, not delete ---
 const deferred = await eraseSubject(order.dataSubjectId, 'subject request');
@@ -93,14 +107,16 @@ const [subjectAfter] = await d
 check('DEK destroyed', subjectAfter.dekWrapped === null);
 check('erasure timestamped', subjectAfter.erasedAt !== null);
 
-let stillReadable = false;
-try {
-  decryptPii(unwrapDek(subjectAfter.dekWrapped), order.customerEmailEnc);
-  stillReadable = true;
-} catch {
-  /* expected */
+function stillReadable(ciphertext) {
+  try {
+    decryptPii(unwrapDek(subjectAfter.dekWrapped), ciphertext);
+    return true;
+  } catch {
+    return false;
+  }
 }
-check('PII is unrecoverable after erasure', !stillReadable);
+check('contact PII is unrecoverable after erasure', !stillReadable(order.customerEmailEnc));
+check('donor name is unrecoverable after erasure', !stillReadable(order.donorNameEnc));
 
 // --- the financial record must survive ---
 const [orderAfter] = await d.select().from(orders).where(eq(orders.id, order.id));
@@ -109,6 +125,10 @@ check('amount retained', orderAfter.fiatAmount === order.fiatAmount);
 check('status retained', orderAfter.status === 'COMPLETED');
 check('pseudonymous subject link retained', orderAfter.dataSubjectId === order.dataSubjectId);
 check('ciphertext retained but inert', orderAfter.customerEmailEnc !== null);
+check('donor name ciphertext retained but inert', orderAfter.donorNameEnc !== null);
+// The campaign is not PII - it names a programme, not a person - so it must
+// survive erasure. Donation reporting has to keep adding up afterwards.
+check('campaign attribution survives erasure', orderAfter.donationCampaign === order.donationCampaign);
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 await closeDb();

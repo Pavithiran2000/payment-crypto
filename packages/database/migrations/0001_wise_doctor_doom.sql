@@ -1,0 +1,1 @@
+ALTER TABLE "orders" RENAME COLUMN "zebpay_credited" TO "binance_credited";

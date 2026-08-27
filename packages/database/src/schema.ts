@@ -127,14 +127,47 @@ export const orders = pgTable(
     quoteId: text('quote_id'),
     quoteExpiresAt: timestamp('quote_expires_at', { withTimezone: true }),
 
+    /**
+     * What this order IS, not how it is paid. A donation and a purchase run
+     * down exactly the same rails - same quote, same signed widget URL, same
+     * webhook, same state machine - and differ only in what the storefront
+     * shows and how the receipt reads. Splitting them into two tables would
+     * have duplicated the state machine, which is the one thing in this system
+     * that must have a single implementation.
+     */
+    orderType: text('order_type').notNull().default('PURCHASE'),
+    /**
+     * Which cause a donation was given to. A slug from a server-side list, not
+     * free text: it is rendered back to donors, so it must not be a place an
+     * attacker can put markup or a URL.
+     */
+    donationCampaign: text('donation_campaign'),
+    /**
+     * The donor's chosen display name, encrypted under the subject's DEK like
+     * every other identifier here. Optional by design - anonymous giving is the
+     * default, and the smallest amount of PII that satisfies the feature is the
+     * right amount.
+     */
+    donorNameEnc: text('donor_name_enc'),
+
     payoutDestinationId: uuid('payout_destination_id').references(() => payoutDestinations.id),
 
     status: orderStatusEnum('status').notNull().default('CREATED'),
     statusChangedAt: timestamp('status_changed_at', { withTimezone: true }).notNull().defaultNow(),
 
+    /**
+     * MoonPay's own transaction id. The join key for inbound events - but,
+     * unlike a session-based provider, it does not exist yet at order creation.
+     *
+     * MoonPay mints nothing up front: the transaction comes into being when the
+     * customer commits inside the widget, and its id first reaches us on the
+     * `transaction_created` webhook. Until then this is NULL and the join runs
+     * on `reference` via `externalTransactionId`. The partial unique index
+     * below is what keeps two orders from ever claiming the same transaction.
+     */
     providerOrderId: text('provider_order_id'),
     chainTxHash: text('chain_tx_hash'),
-    zebpayCredited: boolean('zebpay_credited').notNull().default(false),
+    binanceCredited: boolean('binance_credited').notNull().default(false),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     completedAt: timestamp('completed_at', { withTimezone: true }),
@@ -148,7 +181,15 @@ export const orders = pgTable(
     index('orders_email_idx').on(t.customerEmailIdx),
     /** Drives the reconciliation sweep for stalled orders. */
     index('orders_status_changed_idx').on(t.status, t.statusChangedAt),
+    /** Donation reporting reads this directly; without it every report seq-scans orders. */
+    index('orders_type_campaign_idx').on(t.orderType, t.donationCampaign),
     check('fiat_amount_positive', sql`${t.fiatAmount} > 0`),
+    check('order_type_known', sql`${t.orderType} IN ('PURCHASE', 'DONATION')`),
+    /** Campaign and donor name belong to donations. A purchase carrying either is a bug. */
+    check(
+      'donation_fields_require_donation',
+      sql`${t.orderType} = 'DONATION' OR (${t.donationCampaign} IS NULL AND ${t.donorNameEnc} IS NULL)`,
+    ),
   ],
 );
 

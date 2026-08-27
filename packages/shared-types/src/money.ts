@@ -11,7 +11,7 @@
  * decimal strings and are parsed back at the edge. Never `Number(amount)`.
  */
 
-export type FiatCurrency = 'USD' | 'EUR' | 'GBP' | 'AUD' | 'SGD';
+export type FiatCurrency = 'USD' | 'EUR' | 'GBP' | 'AUD' | 'SGD' | 'LKR';
 export type CryptoAsset = 'USDT' | 'USDC';
 export type ChainNetwork = 'polygon' | 'ethereum';
 
@@ -29,6 +29,7 @@ export const FIAT_DECIMALS: Record<FiatCurrency, number> = {
   GBP: 2,
   AUD: 2,
   SGD: 2,
+  LKR: 2,
 };
 
 /** Asset decimals are network-specific. Look up, never assume. */
@@ -55,6 +56,66 @@ export function parseDecimal(input: string, decimals: number): bigint {
     );
   }
   return BigInt(whole + frac.padEnd(decimals, '0'));
+}
+
+/**
+ * Parse a decimal string that may be padded with insignificant trailing zeros
+ * beyond the asset's precision.
+ *
+ * Providers commonly render every amount at the chain's full precision:
+ * `"0.123400000000000000"` for an 18-decimal asset, or more decimal places than
+ * a 6-decimal USDC balance can hold. Those zeros carry no value, so rejecting
+ * them would fail a webhook over a formatting choice.
+ * Genuinely excess precision — a non-zero digit past the asset's decimals —
+ * still throws, because that is a real mismatch and not an artefact.
+ */
+export function parseDecimalPadded(input: string, decimals: number): bigint {
+  if (!/^\d+(\.\d+)?$/.test(input)) {
+    throw new MoneyParseError(`Not a plain decimal string: ${input}`);
+  }
+  const [whole = '0', frac = ''] = input.split('.');
+  const trimmed = frac.length > decimals ? frac.replace(/0+$/, '') : frac;
+  return parseDecimal(trimmed.length > 0 ? `${whole}.${trimmed}` : whole, decimals);
+}
+
+/**
+ * Render a JSON number as an exact decimal string.
+ *
+ * Some providers send amounts as JSON numbers rather than strings - MoonPay's
+ * `quoteCurrencyAmount` is a `number`. By the time `JSON.parse` has run, the
+ * value is an IEEE-754 double and the original text is gone, so the only safe
+ * move left is to render the double back to the shortest decimal string that
+ * round-trips to exactly that double. `String(n)` does precisely that; this
+ * function only expands the exponent notation `String()` switches to outside
+ * roughly 1e21 and 1e-7, which `parseDecimal` would otherwise reject.
+ *
+ * It does NOT recover precision the double never had. If a provider sends more
+ * significant digits than a double can hold, they were already lost upstream -
+ * which is exactly why this platform's asset list is limited to 6-decimal
+ * stablecoins, where every representable amount survives the round trip. An
+ * 18-decimal asset would need the amount as a string from the provider, not a
+ * number.
+ */
+export function decimalStringFromNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    throw new MoneyParseError(`Not a finite number: ${String(value)}`);
+  }
+
+  const s = String(value);
+  if (!/[eE]/.test(s)) return s;
+
+  const m = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(s);
+  if (!m) throw new MoneyParseError(`Cannot expand exponent notation: ${s}`);
+
+  const [, sign = '', whole = '0', frac = '', expText = '0'] = m;
+  const exp = Number(expText);
+  const digits = whole + frac;
+  // Where the decimal point lands once the exponent is applied.
+  const point = whole.length + exp;
+
+  if (point <= 0) return `${sign}0.${'0'.repeat(-point)}${digits}`;
+  if (point >= digits.length) return `${sign}${digits}${'0'.repeat(point - digits.length)}`;
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
 /** Render integer minor units back to a decimal string for display/transport. */

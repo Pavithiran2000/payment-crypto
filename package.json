@@ -7,8 +7,8 @@
     "node": ">=22.11.0"
   },
   "scripts": {
-    "db:up": "docker compose up -d postgres",
-    "db:down": "docker compose down",
+    "db:up": "echo Using local Postgres - make sure the service is running and the payment_platform database exists (see README)",
+    "db:down": "echo Using local Postgres - stop it via your OS service manager, not this script",
     "db:generate": "pnpm --filter @pp/database generate",
     "db:migrate": "pnpm --filter @pp/database migrate",
     "db:seed": "node scripts/seed.mjs",
