@@ -13,13 +13,13 @@ implementation. See `PAYMENT_INTEGRATION_PLAN.md` for the design rationale and p
 |---|---|---|
 | **Storefront (Next.js)** | `apps/web` | Public-facing catalog/checkout UI. App Router, port `3001`. |
 | **Web BFF (Route Handlers)** | `apps/web/src/app/api/**` | Server-only proxy between the browser and the gateway. Holds the shared secret and merchant ID; the browser never sees either. |
-| **Payment Gateway API (NestJS)** | `apps/api` | Owns orders, payout destinations, and the Stripe onramp integration. Fastify adapter, port `3000`. |
-| **Webhook ingestion** | `apps/api/src/webhooks` | Verifies and records Stripe's signed `crypto.onramp_session.updated` events; the *only* writer of order status. |
-| **Provider adapter** | `packages/providers/stripe-onramp` | Mints onramp sessions against `POST /v1/crypto/onramp_sessions`, verifies webhook signatures, maps Stripe's session statuses to internal `OrderStatus`. |
+| **Payment Gateway API (NestJS)** | `apps/api` | Owns orders, payout destinations, donations, and the MoonPay on-ramp integration. Fastify adapter, port `3000`. |
+| **Webhook ingestion** | `apps/api/src/webhooks` | Verifies and records MoonPay's signed `transaction_created` / `transaction_updated` / `transaction_failed` events; the *only* writer of order status. |
+| **Provider adapter** | `packages/providers/moonpay` | Builds and HMAC-signs widget URLs, fetches buy quotes, verifies `Moonpay-Signature-V2`, maps MoonPay's transaction statuses and failure stages to internal `OrderStatus`. |
 | **Database layer** | `packages/database` | Drizzle ORM + Postgres schema: `orders`, `payoutDestinations`, `orderStatusHistory`, `providerEvents`, `outbox`, `dataSubjects`. Per-order PII encryption (DEK-wrapped). |
 | **Shared types** | `packages/shared-types` | Zero-dependency package: `OrderStatus` state machine, `Money` (bigint decimal) helpers, currency/asset decimal tables. Imported by both `apps/api` and `apps/web`. |
-| **Stripe onramp (external)** | — | Card → crypto on-ramp. Stripe is the *merchant of record*: it takes the card, runs payer KYC and sanctions screening, converts, and delivers on-chain. Its signed webhook is the only source of payment-status truth. |
-| **Binance Entity Account (external)** | — | Fixed settlement destination; the customer never chooses it (`lock_wallet_address=true`), and the webhook handler re-checks the delivered address against the approved one. |
+| **MoonPay on-ramp (external)** | — | Card → crypto on-ramp. MoonPay takes the card, runs payer KYC and sanctions screening, converts, and delivers on-chain. Its signed webhook is the only source of payment-status truth. **It mints no session**: the whole instruction travels in a signed query string. |
+| **Binance Entity Account (external)** | — | Fixed settlement destination; the customer never chooses it (the address is inside the signed query string), and the webhook handler re-checks the delivered address against the approved one. |
 
 ---
 
@@ -45,14 +45,14 @@ flowchart TB
         direction TB
         ApiKeyGuard["ApiKeyGuard<br/>timingSafeEqual(X-API-Key)<br/>guards ALL /orders* routes"]
         OrdersController["OrdersController<br/>POST /orders, GET /orders/:reference"]
-        OrdersService["OrdersService<br/>idempotency check → payout-destination lookup<br/>→ mint onramp session → insert order"]
-        WebhooksController["WebhooksController<br/>POST /webhooks/stripe<br/>NOT guarded by ApiKeyGuard —<br/>trusts only its own signature check"]
+        OrdersService["OrdersService<br/>idempotency check → payout-destination lookup<br/>→ MoonPay buy quote → insert order<br/>→ build signed widget URL"]
+        WebhooksController["WebhooksController<br/>POST /webhooks/moonpay<br/>NOT guarded by ApiKeyGuard —<br/>trusts only its own signature check"]
         WebhooksService["WebhooksService<br/>verifyWebhook() → persist providerEvents (unique)<br/>→ canTransition() → moveTo() → outbox"]
         DB[("Postgres<br/>orders, payoutDestinations,<br/>orderStatusHistory, providerEvents, outbox")]
     end
 
-    subgraph providerTrust["🔵 External — Stripe / Binance"]
-        StripeOnramp["Stripe onramp widget<br/>(js.stripe.com + crypto-js.stripe.com)"]
+    subgraph providerTrust["🔵 External — MoonPay / Binance"]
+        MoonPay["MoonPay on-ramp widget<br/>(buy.moonpay.com, framed via a signed URL)"]
         Binance["Binance Entity Account<br/>(fixed payout address)"]
     end
 
@@ -62,17 +62,17 @@ flowchart TB
     PaymentApi -->|"3 POST /orders<br/>X-API-Key + Idempotency-Key headers"| ApiKeyGuard
     ApiKeyGuard --> OrdersController --> OrdersService
     OrdersService <-->|"lookup destination, insert order"| DB
-    OrdersService -->|"4 session id + client_secret<br/>(wallet_addresses[net], lock_wallet_address=true,<br/>metadata[partner_order_id])"| OrdersController
+    OrdersService -->|"4 signed widget URL<br/>(walletAddress, currencyCode, lockAmount=true,<br/>externalTransactionId, allowedIpAddress, signature)"| OrdersController
     OrdersController -->|"5"| PaymentApi --> CheckoutRoute -->|"{reference, checkoutUrl} only"| UI
     UI -->|"6 navigate to /checkout/onramp/[reference]"| Browser
-    Browser -->|"7 mounts widget in an iframe on our own page"| StripeOnramp
-    StripeOnramp -->|"8 card payment, KYC, conversion"| StripeOnramp
-    StripeOnramp -->|"9 settles crypto to locked address"| Binance
-    StripeOnramp -.->|"10 signed webhook (Stripe-Signature)<br/>— sole source of status truth"| WebhooksController
+    Browser -->|"7 frames the signed URL on our own page"| MoonPay
+    MoonPay -->|"8 card payment, KYC, conversion"| MoonPay
+    MoonPay -->|"9 settles crypto to the signed address"| Binance
+    MoonPay -.->|"10 signed webhook (Moonpay-Signature-V2)<br/>— sole source of status truth"| WebhooksController
     WebhooksController --> WebhooksService
     WebhooksService <-->|"verify, dedupe, canTransition, moveTo"| DB
-    StripeOnramp -->|"11 onramp_session_updated event (NOT trusted)"| Browser
-    Browser -->|"12 router.push to /orders/[reference]"| UI
+    MoonPay -->|"11 redirectURL navigation (NOT trusted)"| Browser
+    Browser -->|"12 lands on /orders/[reference]"| UI
     UI -->|"13 poll GET /api/orders/[reference] every 4s"| OrderRoute
     OrderRoute --> PaymentApi -->|"GET /orders/:reference"| ApiKeyGuard --> OrdersController --> OrdersService --> DB
 
@@ -83,7 +83,7 @@ flowchart TB
     class Browser untrustedStyle
     class UI,CheckoutRoute,OrderRoute,PaymentApi bffStyle
     class ApiKeyGuard,OrdersController,OrdersService,WebhooksController,WebhooksService,DB apiStyle
-    class StripeOnramp,Binance extStyle
+    class MoonPay,Binance extStyle
 ```
 
 ### Trust boundaries, explicitly
@@ -109,17 +109,17 @@ flowchart TB
    `/api/orders/[reference]` returns only status-relevant fields (reference, status, amount,
    currency, asset, network) — no internal IDs, no PII.
 
-4. **Client event ↔ webhook (the trust model's core boundary).** The widget's
-   `onramp_session_updated` event is a **UI signal, not proof of payment** — it is never used to
-   advance order status, only to stop making the customer stare at a finished form. Only
-   `POST /webhooks/stripe`, verified via `verifyWebhook()` (HMAC-SHA256 over `<t>.<rawBody>`
-   against `STRIPE_ONRAMP_WEBHOOK_SECRET`, `v1` scheme only, ±5 minutes), can move an order
+4. **Browser return ↔ webhook (the trust model's core boundary).** MoonPay's `redirectURL`
+   navigation is a **UI signal, not proof of payment** — it is never used to advance order
+   status, only to land the customer somewhere sensible. Only `POST /webhooks/moonpay`, verified
+   via `verifyWebhook()` (HMAC-SHA256 over `<t>.<rawBody>` against `MOONPAY_WEBHOOK_KEY` — the
+   `wk_` key, not the secret API key — `Moonpay-Signature-V2` only), can move an order
    forward. This is enforced at two independent layers: the webhook route rejects unverifiable
    payloads (400), and `OrdersController`'s `GET /orders/:reference` handler comment states
    explicitly it only ever reads a value **only a verified webhook writes**.
 
 5. **Webhook controller is intentionally *not* behind `ApiKeyGuard`.** `WebhooksController` is a
-   separate `@Controller('webhooks')`, not decorated with `@UseGuards(ApiKeyGuard)` — Stripe
+   separate `@Controller('webhooks')`, not decorated with `@UseGuards(ApiKeyGuard)` — MoonPay
    cannot present the web BFF's shared secret, so the webhook route authenticates purely via
    signature verification against `rawBody`. Confirmed by reading `app.module.ts`: `ApiKeyGuard`
    is registered as an injectable provider (constructor-injected into `OrdersController`), not as
@@ -129,10 +129,15 @@ flowchart TB
    order gets its own `dataSubjects` row with a wrapped DEK; `customerEmailEnc` is
    application-layer encrypted, with a separate `customerEmailIdx` blind index for lookup.
 
-7. **apps/api ↔ Stripe/Binance (settlement boundary).** `buildSessionForm` sets
-   `lock_wallet_address=true` and passes a `wallet_addresses[<network>]` sourced only from an **approved,
-   unrevoked, active** row in `payoutDestinations` — the payer can never redirect settlement to
-   their own address.
+7. **apps/api ↔ MoonPay/Binance (settlement boundary).** With MoonPay the deposit address
+   travels in a **query parameter**, so the query string *is* the settlement boundary.
+   `buildWidgetUrl` HMAC-signs it with the secret key, and MoonPay refuses to load a URL
+   carrying `walletAddress` without a valid signature — the payer cannot redirect settlement to
+   their own address, or change the amount (`lockAmount=true`) or the asset (a pinned
+   `currencyCode`). The address itself comes only from an **approved, unrevoked, active** row in
+   `payoutDestinations`, re-read at URL-build time so a revoked destination stops being payable
+   immediately. Signed URLs are additionally bound to a hash of the payer's IP
+   (`allowedIpAddress`) and are never persisted — they are rebuilt per request.
 
 ---
 
@@ -146,7 +151,7 @@ sequenceDiagram
     participant BFF as apps/web BFF<br/>(/api/checkout)
     participant API as apps/api<br/>(OrdersController/Service)
     participant DB as Postgres
-    participant TX as Stripe onramp
+    participant TX as MoonPay on-ramp
     participant WH as apps/api<br/>(WebhooksController/Service)
 
     C->>Web: Fill contact/billing form, pick USDT/Polygon
@@ -165,21 +170,22 @@ sequenceDiagram
             BFF-->>Web: 400 error
             Web-->>C: inline error message
         else destination found
-            API->>DB: BEGIN TX: insert dataSubjects, insert orders (status=CREATED),<br/>insert orderStatusHistory
-            API->>TX: POST /v1/crypto/onramp_sessions<br/>lock_wallet_address=true, wallet_addresses[network],<br/>metadata[partner_order_id], Idempotency-Key
+            API->>TX: GET /v3/currencies/{code}/buy_quote<br/>(pre-flight: pair, amount, eligibility)
+            API->>DB: BEGIN TX: insert dataSubjects, insert orders (status=CREATED,<br/>cryptoAmountQuoted, quoteExpiresAt),<br/>insert orderStatusHistory
+            API->>API: buildWidgetUrl() — HMAC-SHA256 sign the query string<br/>walletAddress, lockAmount=true, currencyCode,<br/>externalTransactionId, allowedIpAddress
         end
     end
     API-->>BFF: 200 {reference, checkoutUrl, ...}
     BFF-->>Web: 200 {reference, checkoutUrl}
     Web->>C: window.location.href = checkoutUrl
-    C->>TX: mount widget on /checkout/onramp/[reference] (card entry, KYC, conversion)
+    C->>TX: signed URL framed on /checkout/onramp/[reference] (card entry, KYC, conversion)
     TX->>TX: Process card payment → KYC → convert to crypto
-    TX->>WH: POST /webhooks/stripe (Stripe-Signature, rawBody)
+    TX->>WH: POST /webhooks/moonpay (Moonpay-Signature-V2, rawBody)
     WH->>WH: verifyWebhook(secret, rawBody, headers)
     alt signature invalid
         WH-->>TX: 401 signature verification failed
     else signature valid
-        WH->>DB: insert providerEvents (unique externalEventId)
+        WH->>DB: insert providerEvents (unique externalEventId,<br/>synthesised: type:txId:updatedAt)
         alt duplicate delivery
             DB-->>WH: unique_violation (23505)
             WH-->>TX: 200 {received:true, duplicate:true}
@@ -195,8 +201,8 @@ sequenceDiagram
             end
         end
     end
-    TX-->>C: onramp_session_updated event (NOT trusted as proof)
-    C->>Web: router.push /orders/[reference]
+    TX-->>C: redirectURL navigation (NOT trusted as proof)
+    C->>Web: lands on /orders/[reference]
     Web->>Web: render whatever the webhook-driven record says
     loop every 4000ms until isTerminal(status)
         Web->>BFF: GET /api/orders/[reference]
@@ -213,11 +219,14 @@ Key properties this sequence encodes:
   retry after a network blip returns the original order rather than creating a duplicate.
 - **Webhook processing is decoupled from the HTTP response** — `ingest()` acknowledges the
   provider immediately after persisting the raw event, then processes asynchronously
-  (`void this.process(...)`), so a slow DB never causes Stripe to see a timeout and retry a
-  webhook already on file.
+  (`void this.process(...)`), so a slow DB never causes MoonPay to see a timeout and retry a
+  webhook already on file. MoonPay's window is **5 seconds**, with 9 backoff retries after that.
 - **Row-level locking** (`SELECT ... FOR UPDATE`) serializes concurrent webhooks for the same
-  order, preventing lost updates when Stripe delivers out-of-order or overlapping events —
-  which Stripe explicitly does not guarantee against.
+  order, preventing lost updates when MoonPay delivers out-of-order or overlapping events —
+  which MoonPay explicitly warns about, especially on retries.
+- **Deduplication without an event id** — MoonPay webhooks carry no event id, so the unique key
+  on `providerEvents` is synthesised from `type` + transaction `id` + `updatedAt`, per MoonPay's
+  own guidance.
 - **The browser redirect and the status page are read-only observers** — nothing the browser does
   after leaving `apps/web` can change an order's status; only the webhook path writes it.
 

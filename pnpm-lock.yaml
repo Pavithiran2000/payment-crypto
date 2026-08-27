@@ -50,9 +50,9 @@ importers:
       '@pp/database':
         specifier: workspace:*
         version: link:../../packages/database
-      '@pp/provider-stripe-onramp':
+      '@pp/provider-moonpay':
         specifier: workspace:*
-        version: link:../../packages/providers/stripe-onramp
+        version: link:../../packages/providers/moonpay
       '@pp/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
@@ -153,7 +153,7 @@ importers:
         specifier: ^4.19.2
         version: 4.23.1
 
-  packages/providers/stripe-onramp:
+  packages/providers/moonpay:
     dependencies:
       '@pp/shared-types':
         specifier: workspace:*

@@ -2,9 +2,38 @@
 
 **Date:** 2026-08-20
 **Question asked:** which of **PayHere**, **WEBXPAY** or **dLocal** is the best 2D-card
-gateway for a Sri Lankan card→bank rail, alongside the existing Stripe onramp.
+gateway for a Sri Lankan card→bank rail, alongside the existing on-ramp.
+**Revised 2026-08-23:** the on-ramp leg moved from Stripe to MoonPay. That narrows
+— but does not remove — the gap this document exists to fill. See §0.0.
 **Answer:** **PayHere**, with WEBXPAY as the upgrade path. dLocal does not serve
 Sri Lanka.
+
+---
+
+## 0.0 What the MoonPay migration changed about this question
+
+This document was written while Rail A was Stripe's on-ramp, which funds **only
+from USD and EUR** and serves **only the EU and US**. A Sri Lankan customer simply
+could not pay through it. That was the strongest argument for a second gateway.
+
+**MoonPay lists `lkr` as a supported fiat currency**, and the storefront now
+offers it. So a Sri Lankan cardholder *can* pay on Rail A today. Three things keep
+Rail B a real question rather than a settled one:
+
+1. **The minimum is 7,000 LKR** (roughly USD 23) per card payment on Rail A.
+   Anything smaller is refused outright by MoonPay. PayHere has no comparable
+   floor, so low-value orders and small donations are Rail B's alone.
+2. **The outcome is different.** Rail A ends with crypto in a Binance Entity
+   Account. Rail B ends with LKR in a Sri Lankan bank account. That is a
+   business/treasury choice, not a routing detail, and §0.1's legal question is
+   unchanged by which on-ramp is in front of it.
+3. **Local acceptance rates and 2D-card support** are what §0.2's questionnaire is
+   for. An international on-ramp accepting LKR is not the same as a domestic
+   acquirer, and issuer decline rates on cross-border 3DS are the reason to ask.
+
+So: the *geographic* case for Rail B is weaker than it was. The *economic* case
+(minimums, fees, acceptance) and the *treasury* case (fiat vs crypto settlement)
+are untouched. Re-run the volume numbers before committing to the build.
 
 Two things below will change how this gets scoped, so they are first.
 
@@ -31,9 +60,10 @@ So the second gateway is a genuinely separate rail:
 
 | | Rail A (built) | Rail B (this document) |
 |---|---|---|
-| Provider | Stripe fiat-to-crypto onramp | PayHere |
-| Customer geography | EU + US only | Sri Lanka |
-| Funding currency | USD, EUR | LKR (+ USD/GBP/EUR/AUD) |
+| Provider | MoonPay fiat-to-crypto on-ramp | PayHere |
+| Customer geography | wide; MoonPay lists LKR among ~35 fiat currencies | Sri Lanka |
+| Funding currency | USD, EUR, GBP, AUD, LKR (enabled); more available | LKR (+ USD/GBP/EUR/AUD) |
+| Minimum payment | 20 USD/EUR/GBP · 35 AUD · **7,000 LKR** | PayHere's own floor, far lower |
 | Settles to | Binance Entity Account (USDC) | Sri Lankan bank account (LKR) |
 | Order outcome | crypto delivered on-chain | fiat cleared to bank |
 
@@ -180,7 +210,7 @@ package swap.
 
 ### 3.1 Shape
 
-A new provider package, mirroring `packages/providers/stripe-onramp`:
+A new provider package, mirroring `packages/providers/moonpay`:
 
 ```
 packages/providers/payhere/
@@ -214,15 +244,15 @@ UPPERCASE(MD5( merchant_id + order_id + amount + currency + status_code
                + UPPERCASE(MD5(merchant_secret)) ))
 ```
 
-Compared with Stripe's `Stripe-Signature`, that is weaker in two specific ways, and
-both need compensating for:
+Compared with MoonPay's `Moonpay-Signature-V2`, that is weaker in two specific
+ways, and both need compensating for:
 
 - **MD5, not HMAC-SHA256.** MD5 is broken for collision resistance. Used as a keyed
   digest over short structured fields it is not trivially forgeable, but it is not
   something to build new systems on. It is what PayHere provides; the mitigation is
   defence in depth, not a better parse.
 - **No timestamp in the signed payload, so a captured notification replays forever.**
-  Stripe's `t` bounds the window; there is no equivalent here.
+  MoonPay's `t` bounds the window; there is no equivalent here.
 
 The existing architecture already absorbs most of that, which is the useful part:
 
@@ -247,7 +277,7 @@ consequence of the weaker signature.
 2. Get Sri Lankan legal sign-off on §0.1 — specifically, that the goods being sold
    on Rail B are ordinary goods and the rail is not connected to the crypto leg.
 3. PayHere sandbox account; verify the LKR flow end to end against a stub, the same
-   way `scripts/stripe-stub.mjs` works for Rail A.
+   way `scripts/moonpay-stub.mjs` works for Rail A.
 4. `settlement_rail` migration and the guard that stops a crypto order selecting
    Rail B.
 5. Provider package, then the `apps/api` seam, then the storefront option.

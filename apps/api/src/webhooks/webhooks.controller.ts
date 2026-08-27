@@ -11,9 +11,9 @@ export class WebhooksController {
   // emitDecoratorMetadata, which tsx's dev transpile does not reliably emit.
   constructor(@Inject(WebhooksService) private readonly webhooks: WebhooksService) {}
 
-  @Post('stripe')
+  @Post('moonpay')
   @HttpCode(200)
-  async stripe(@Req() req: RawBodyRequest, @Res() reply: FastifyReply): Promise<void> {
+  async moonpay(@Req() req: RawBodyRequest, @Res() reply: FastifyReply): Promise<void> {
     if (!req.rawBody) {
       // Without the exact received bytes the HMAC cannot be checked. Failing
       // loudly here beats silently verifying against re-serialized JSON.
@@ -24,13 +24,15 @@ export class WebhooksController {
     const outcome = await this.webhooks.ingest(req.rawBody, req.headers);
 
     if (!outcome.accepted) {
-      // 400, following Stripe's own handler examples. Stripe retries any
-      // non-2xx for up to three days, which is the behaviour we want if the
-      // cause is an endpoint secret caught mid-roll rather than a forgery.
+      // 400. MoonPay retries any non-2xx up to nine times with exponential
+      // backoff, which is the behaviour we want if the cause is a webhook key
+      // caught mid-rotation rather than a forgery.
       reply.status(400).send({ error: 'signature verification failed' });
       return;
     }
 
+    // MoonPay expects a 2xx within five seconds. Everything expensive happens
+    // after this response - see WebhooksService.ingest.
     reply.status(200).send({ received: true, duplicate: outcome.duplicate });
   }
 }

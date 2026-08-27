@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "storefront",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["--filter", "@pp/web", "dev"],
+      "port": 3001
+    }
+  ]
+}

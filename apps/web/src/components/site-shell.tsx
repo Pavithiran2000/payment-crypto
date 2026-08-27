@@ -1,7 +1,7 @@
 import Link from "next/link";
 
-const nav = ["Home", "Products", "Applications", "About Us", "Projects", "Contact"] as const;
-const hrefs: Record<(typeof nav)[number], string> = { Home: "/", Products: "/products", Applications: "/applications", "About Us": "/about", Projects: "/projects", Contact: "/contact" };
+const nav = ["Home", "Products", "Applications", "About Us", "Projects", "Donate", "Contact"] as const;
+const hrefs: Record<(typeof nav)[number], string> = { Home: "/", Products: "/products", Applications: "/applications", "About Us": "/about", Projects: "/projects", Donate: "/donate", Contact: "/contact" };
 
 export function Header({ active }: { active: (typeof nav)[number] }) {
   return <header className="site-header"><div className="wrap nav-wrap">
@@ -13,5 +13,5 @@ export function Header({ active }: { active: (typeof nav)[number] }) {
 }
 
 export function Footer() {
-  return <footer><div className="wrap footer-grid"><div><h3>Bangalore Clay Tiles</h3><p>© 2024 Bangalore Clay Tiles.<br />Architectural Excellence in Terracotta.</p></div><div><h3>Legal</h3><Link href="#">Privacy Policy</Link><Link href="#">Terms of Service</Link></div><div><h3>Resources</h3><Link href="#">Sustainability</Link><Link href="#">Installation Guide</Link></div></div></footer>;
+  return <footer><div className="wrap footer-grid"><div><h3>Bangalore Clay Tiles</h3><p>© 2024 Bangalore Clay Tiles.<br />Architectural Excellence in Terracotta.</p></div><div><h3>Legal</h3><Link href="#">Privacy Policy</Link><Link href="#">Terms of Service</Link></div><div><h3>Support Us</h3><Link href="/donate">Donate</Link><Link href="/donate?campaign=artisan-apprenticeships">Apprenticeships</Link></div><div><h3>Resources</h3><Link href="#">Sustainability</Link><Link href="#">Installation Guide</Link></div></div></footer>;
 }

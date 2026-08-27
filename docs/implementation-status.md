@@ -1,11 +1,12 @@
 # Implementation Status & Next Steps
 
-**Date:** 2026-07-31, revised 2026-08-20 (onramp provider swapped to Stripe)
+**Date:** 2026-07-31, revised 2026-08-23 (on-ramp provider swapped to MoonPay)
 **Phase:** sandbox vertical slice complete
 **Design source:** `transak_zebpay_card_to_crypto_simple_report_updated.md`
-**Provider change:** [`stripe-onramp-migration.md`](stripe-onramp-migration.md) —
-the original report specified Transak; the onramp leg now runs on Stripe's
-fiat-to-crypto onramp. Read that first if anything below reads as stale.
+**Provider change:** [`moonpay-onramp-migration.md`](moonpay-onramp-migration.md) —
+the original report specified Transak; the on-ramp leg now runs on MoonPay. That
+document carries the credentials, the step-by-step setup and every
+provider-specific decision. Read it first if anything below reads as stale.
 
 Part 1 records what exists and why. Part 2 is the work queue, in priority order,
 with enough detail to pick up cold.
@@ -19,7 +20,7 @@ with enough detail to pick up cold.
 One working vertical slice:
 
 ```
-create order → Stripe onramp session → embedded widget → verified webhook → state transition → record
+create order → MoonPay buy quote → signed widget URL → framed widget → verified webhook → state transition → record
 ```
 
 29 source files. Everything below was executed against a live Postgres, not just
@@ -29,8 +30,8 @@ written.
 |---|---|---|
 | Build (all packages) | `pnpm build` | clean |
 | Lint + module boundaries | `pnpm lint` | clean |
-| End-to-end guarantees | `pnpm smoke` | **15 / 15** |
-| PII erasure guarantees | `pnpm check:erasure` | **12 / 12** |
+| End-to-end guarantees | `pnpm smoke` | **63 / 63** |
+| PII erasure guarantees | `pnpm check:erasure` | **17 / 17** |
 
 `pnpm verify` runs all four.
 
@@ -53,13 +54,15 @@ packages/database/
   src/migrate.ts                migration runner
   migrations/0000_*.sql         generated, reviewable
 
-packages/providers/stripe-onramp/
-  src/mapping.ts                currency/network/status translation
-  src/session.ts                onramp session create + retrieve
-  src/webhook.ts                signature verification, event parsing
+packages/providers/moonpay/
+  src/config.ts                 credential validation, environment derivation
+  src/mapping.ts                currency/network/status/stage translation
+  src/widget.ts                 signed widget URLs, payer-IP hashing
+  src/api.ts                    buy quote + transaction lookup
+  src/webhook.ts                signature verification, event id derivation
 
-scripts/smoke.mjs               15 end-to-end assertions
-scripts/erasure-check.mjs       12 erasure assertions
+scripts/smoke.mjs               63 end-to-end assertions
+scripts/erasure-check.mjs       17 erasure assertions
 scripts/seed.sql                test merchant + approved destination
 docs/pii-retention-policy.md    the PII/AML resolution
 ```
@@ -104,16 +107,20 @@ order complete. Verification handles the three things that actually break:
 - **raw body** — Fastify parses JSON before the handler runs, so the HMAC is
   computed over `req.rawBody`; re-serialized JSON produces different bytes and
   never matches. App is created with `{ rawBody: true }`.
-- **timestamp tolerance** (±5 min) — otherwise a valid signature is replayable
-  forever.
+- **timestamp tolerance** — otherwise a valid signature is replayable forever.
 - **constant-time compare** — `===` leaks a signature byte by byte.
 
-Stripe's scheme is documented and singular, so there is one implementation and no
-configuration switch. Two Stripe specifics on top of the general rules: `t` is in
-**seconds**, and the header can carry **several `v1` signatures** while an endpoint
-secret is being rolled — accepting only the first turns every rotation into an
-outage. Schemes other than `v1` (Stripe sends a `v0` on test events) are ignored;
-honouring them would be a downgrade attack.
+Three MoonPay specifics on top of the general rules. Verification uses the
+**webhook key** (`wk_...`), a different secret from the secret API key — crossing
+them fails every check with no visible error. Only `Moonpay-Signature-V2` is
+honoured; the legacy header is keyed differently and accepting it would be a
+downgrade. And the tolerance is **one hour, not five minutes**: MoonPay retries
+nine times with exponential backoff and does not document whether retries are
+re-signed, so a short window risks rejecting legitimate retries forever. Replay is
+really prevented by the dedupe constraint below; see §3.4 of the migration runbook.
+
+**MoonPay events carry no event id.** The dedupe key is synthesised from `type` +
+transaction `id` + `updatedAt`, which is MoonPay's own documented guidance.
 
 ### Deduplication is a database constraint
 `provider_events` unique on `(provider, external_event_id)`. Insert first, process
@@ -172,18 +179,16 @@ engineering task.**
 
 **Why first:** this is a binary business risk. Standard on-ramp terms assume
 delivery to the KYC'd payer's *own* wallet. Payer ≠ beneficiary to a corporate
-exchange account is exactly what AML controls flag. If Stripe says no, most of
+exchange account is exactly what AML controls flag. If MoonPay says no, most of
 the roadmap below is wasted. The original report sequences this in Phase 4 — that
 is backwards.
 
-Stripe adds a second gate ahead of it: onramp access is **application-gated even
-for sandboxes**, and the onramp is available only in the EU and the US, funding
-only from USD and EUR. Confirm the customer geographies before applying.
+MoonPay's own gate is **KYB**, which takes weeks and blocks live keys. Sandbox
+keys are self-serve and issued on signup, so building can start immediately — but
+sandbox access answers **none** of the questions below. It tells you nothing about
+whether the model is permitted in production.
 
-Sandbox access does **not** answer this. Staging keys are typically self-serve;
-they tell you nothing about whether the model is permitted in production.
-
-**Get answers in writing, from both Stripe and Binance:**
+**Get answers in writing, from both MoonPay and Binance:**
 
 - [ ] May the payer and the receiving wallet owner be different parties?
 - [ ] May the beneficiary be a corporate entity holding a Binance Entity Account?
@@ -193,10 +198,15 @@ they tell you nothing about whether the model is permitted in production.
 - [ ] **Who bears chargeback liability?** ← the one with real money attached
 - [ ] What sender/beneficiary information must accompany each transfer (Travel Rule)?
 
-**Also confirm the settlement asset** while you have their attention. Stripe's
-published availability table lists USDC (Polygon) but not USDT, even though `usdt`
-is in the API's currency enum — the storefront defaults to USDC for that reason.
-And confirm where Stripe's merchant-of-record dispute liability ends.
+**Also confirm the settlement asset** while you have their attention. MoonPay
+lists both `usdc_polygon` and `usdt_polygon` as live; the storefront defaults to
+USDC/Polygon because Polygon's fee is a fraction of Ethereum's and USDC has the
+wider geographic availability. Note `usdc_polygon` is unavailable in Canada and
+restricted in the US Virgin Islands; `usdt_polygon` adds New York.
+
+**And ask whether webhook retries are re-signed with a fresh timestamp.** It is
+the one open question in the verification path — see §3.4 of the migration
+runbook. The full question list is §8 of that document.
 
 **Done when:** written confirmation on file naming the entity, asset, network and
 geographies. Record it in `docs/provider-approval.md`.
@@ -281,7 +291,7 @@ reachable — including a demo URL.
 - [ ] A destination is unusable before `active_from`.
 - [ ] Admin login without 2FA is refused.
 
-> **Leave `/webhooks/stripe` unauthenticated.** It is authenticated by signature.
+> **Leave `/webhooks/moonpay` unauthenticated.** It is authenticated by signature.
 > Do not put an API-key check in front of it.
 
 ---
@@ -313,19 +323,21 @@ Step 0's liability answer determines how much of this you need.
 
 ## Step 4 — Quote lock
 
-**Why:** `quote_id` and `quote_expires_at` exist but nothing populates them. Until
-they do, the crypto figure shown at checkout is indicative only — and the gap
-between quote and delivery is a dispute waiting to happen.
+**Why:** `crypto_amount_quoted` and `quote_expires_at` are now populated from
+MoonPay's buy quote at order creation, but nothing *enforces* the expiry. Until it
+does, the crypto figure shown at checkout is indicative only — and the gap between
+quote and delivery is a dispute waiting to happen.
 
 ### Build
 
-- Fetch a quote at order creation via `GET /v1/crypto/onramp/quotes`; persist
-  `quote_id`, `crypto_amount_quoted`, `quote_expires_at`. Note Stripe's quote
-  response carries `source_total_amount` and a `fees` breakdown
-  (`network_fee_monetary`, `transaction_fee_monetary`) — the fee split is what the
-  customer will ask about, so surface it rather than only the net.
+- **Done:** `GET /v3/currencies/{code}/buy_quote` at order creation, persisting
+  `crypto_amount_quoted` and `quote_expires_at`. MoonPay returns no quote id, so
+  `quote_id` stays NULL — a locked quote needs MoonPay's Platform API.
 - Reject checkout on an expired quote; require re-quote.
-- Show the fee breakdown and the rate explicitly at checkout.
+- **Surface the fee breakdown.** MoonPay's quote response carries `feeAmount`,
+  `networkFeeAmount`, `extraFeeAmount` and `totalAmount` separately — the split is
+  what the customer will ask about, so show it rather than only the net. The
+  provider already parses all four; nothing renders them yet.
 - On settlement, store `crypto_amount_settled` and record the delta.
 
 ### Acceptance criteria

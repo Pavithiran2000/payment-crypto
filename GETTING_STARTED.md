@@ -9,9 +9,9 @@ end. Written assuming you have never run this project before.
 
 Two apps talk to each other:
 
-- **`apps/api`** (NestJS, port `3000`) — the payment gateway. Creates orders, mints a Stripe
-  fiat-to-crypto onramp session, and listens for Stripe's signed webhook to know when a payment
-  actually happened.
+- **`apps/api`** (NestJS, port `3000`) — the payment gateway. Creates orders, prices them with
+  MoonPay, builds a signed MoonPay on-ramp URL, and listens for MoonPay's signed webhook to know
+  when a payment actually happened.
 - **`apps/web`** (Next.js, port `3001`) — the storefront. Its server-side code (never the browser)
   calls `apps/api` to create orders and check status.
 
@@ -35,7 +35,7 @@ password you set for the `postgres` superuser during install.
 
 ## 3. Credentials & secrets you need to gather
 
-Nothing here talks to real money. Everything below is either generated locally or a **Stripe
+Nothing here talks to real money. Everything below is either generated locally or a **MoonPay
 sandbox** credential — there is no cost and no live financial risk.
 
 ### 3.1 Database credentials (yours — you already set these)
@@ -53,33 +53,38 @@ Whatever you chose when installing Postgres locally:
 > If your local Postgres runs on the default port `5432`, use `5432` instead of `5433` — just
 > keep `DATABASE_URL` in `.env` consistent with whatever your server is actually listening on.
 
-### 3.2 Stripe sandbox credentials (approval required, no real money)
+### 3.2 MoonPay sandbox credentials (self-serve, no real money)
 
-Stripe's fiat-to-crypto onramp is the card→crypto provider. Unlike an ordinary Stripe
-integration it is **access-gated: you must be approved before the API works at all, including
-in a sandbox.**
+MoonPay's on-ramp is the card→crypto provider. **Sandbox keys are issued immediately on
+signup** — no application, no approval wait. (Production keys are a different matter: they are
+gated on business verification, which takes weeks.)
 
-1. Create or sign in to a Stripe account and complete account onboarding.
-2. Submit the onramp application at
-   <https://dashboard.stripe.com/crypto-onramp/get-started>. Stripe reviews most applications
-   within 48 hours.
-3. Once approved, take the keys from <https://dashboard.stripe.com/apikeys>:
-   - **Secret key** (`sk_test_...`) → `STRIPE_SECRET_KEY`
-   - **Publishable key** (`pk_test_...`) → `STRIPE_PUBLISHABLE_KEY`
-4. Create a webhook endpoint subscribed to `crypto.onramp_session.updated`, or run
-   `stripe listen --forward-to localhost:3000/webhooks/stripe`. Either way you get a
-   `whsec_...` signing secret → `STRIPE_ONRAMP_WEBHOOK_SECRET`. **That is a different secret
-   from the API key, and the `stripe listen` one differs from a Dashboard endpoint's.**
+1. Sign up at <https://dashboard.moonpay.com> and switch the dashboard to **Sandbox**.
+2. Go to **Developers → API keys** and take **all three**:
+   - **Publishable key** (`pk_test_...`) → `MOONPAY_PUBLISHABLE_KEY`
+   - **Secret key** (`sk_test_...`) → `MOONPAY_SECRET_KEY`
+   - **Webhook key** (`wk_test_...`) → `MOONPAY_WEBHOOK_KEY`
+3. Under **Developers → Webhooks**, add an endpoint at
+   `https://<your-public-host>/webhooks/moonpay` subscribed to `transaction_created`,
+   `transaction_updated` and `transaction_failed`.
 
-**You do not need any of this to run the project.** `.env` ships with `STRIPE_API_BASE_URL`
-pointing at `scripts/stripe-stub.mjs`, a local stand-in for `POST /v1/crypto/onramp_sessions`.
-Order creation, session parameters, webhook verification and every state transition run for
-real against it; only Stripe's own payment UI is missing. `pnpm smoke` starts the stub itself.
-Delete `STRIPE_API_BASE_URL` once you have real keys — the API refuses that override outright
-if the secret key is a live one.
+> **The three keys are not interchangeable.** The secret key signs widget URLs; the **webhook**
+> key verifies inbound webhooks. Using the secret key for verification fails every check with no
+> error other than 400s in MoonPay's webhook log — it is the single most common MoonPay
+> integration bug. The API also refuses to boot if the three keys are not all from the same
+> environment.
 
-Sandbox test values, once you do have access: OTP `000000`, SSN `000000000`, address line 1
-`address_full_match`, card `4242424242424242`.
+**You do not need any of this to run the project.** `.env` ships with `MOONPAY_API_BASE_URL`
+pointing at `scripts/moonpay-stub.mjs`, a local stand-in for MoonPay's quote and transaction
+endpoints. Order creation, quoting, URL signing, webhook verification and every state transition
+run for real against it; only MoonPay's own payment UI is missing. `pnpm smoke` starts the stub
+itself. Delete `MOONPAY_API_BASE_URL` once you have real keys — the API refuses that override
+outright if the keys are live ones.
+
+Sandbox test cards, once you do have access (expiry `12/2030`, CVC `123`):
+`4242 4242 4242 4242` (Visa, 3DS challenge, succeeds) and `4544 2491 6767 3670` (fails,
+insufficient funds). KYC is not verified in sandbox — use a US or UK address and click
+**"Skip document submission"**.
 
 ### 3.3 Secrets you generate yourself (no signup needed)
 
@@ -118,11 +123,12 @@ DB_SSL=false
 PII_MASTER_KEK=<generated in 3.3>
 PII_BLIND_INDEX_PEPPER=<generated in 3.3>
 
-STRIPE_SECRET_KEY=<from 3.2, or leave the placeholder for stub-only work>
-STRIPE_PUBLISHABLE_KEY=<from 3.2, or leave the placeholder for stub-only work>
-STRIPE_ONRAMP_WEBHOOK_SECRET=<from 3.2; the smoke test signs with whatever is here>
-STRIPE_ONRAMP_MODE=embedded
-STRIPE_API_BASE_URL=http://127.0.0.1:4599   # delete once you have real keys
+MOONPAY_PUBLISHABLE_KEY=<from 3.2, or leave the placeholder for stub-only work>
+MOONPAY_SECRET_KEY=<from 3.2, or leave the placeholder for stub-only work>
+MOONPAY_WEBHOOK_KEY=<from 3.2; the smoke test signs with whatever is here>
+MOONPAY_WIDGET_MODE=embedded
+MOONPAY_REQUIRE_IP_MATCH=false
+MOONPAY_API_BASE_URL=http://127.0.0.1:4599   # delete once you have real keys
 WEB_BASE_URL=http://localhost:3001
 
 AML_RETENTION_DAYS=1825
@@ -201,7 +207,7 @@ Leave both running for the rest of this guide.
 
 ## 6. Testing — two levels
 
-### 6.1 Automated smoke test (no browser, no Stripe account needed)
+### 6.1 Automated smoke test (no browser, no MoonPay account needed)
 
 With `apps/api` running (Terminal 1 above), in a third terminal:
 
@@ -209,17 +215,18 @@ With `apps/api` running (Terminal 1 above), in a third terminal:
 pnpm smoke
 ```
 
-This exercises 15 real guarantees against the running API: order creation, idempotency (same
-key → same order, no duplicate), webhook signature verification (valid vs. tampered vs. expired
-timestamp), duplicate webhook delivery (safe no-op), out-of-order/backwards transitions (rejected),
-and the full happy-path status progression — all using self-signed fake webhooks, so it needs
-nothing from Stripe's actual servers — the suite signs its own events and starts its own stub
-of the session API.
+This exercises 63 real guarantees against the running API: order creation, quoting, idempotency
+(same key → same order, no duplicate re-quote), widget-URL signing, wallet-address pinning and
+amount locking, secret-key containment, IP binding, webhook signature verification (valid vs.
+tampered vs. expired timestamp vs. legacy header), duplicate webhook delivery (safe no-op),
+out-of-order/backwards transitions (rejected), stage-aware failure mapping, misdelivery
+detection, the donation path, and the full happy-path status progression — all using self-signed
+fake webhooks, so it needs nothing from MoonPay's actual servers.
 
 Also worth running:
 
 ```bash
-pnpm check:erasure   # 12 assertions that customer PII can be erased without corrupting orders
+pnpm check:erasure   # 17 assertions that customer PII can be erased without corrupting orders
 pnpm verify           # build + lint + smoke + check:erasure, all in one
 ```
 
@@ -234,21 +241,25 @@ With both `pnpm api:dev` and `pnpm web:dev` running:
    custom-quote — there's no fixed catalog price).
 3. Proceed to checkout, fill in contact/billing details, and select **USDC (Polygon)** (currently
    the only payment option — see 5.3 and `apps/web/src/lib/payment-config.ts`).
-4. Submit. You land on `/checkout/onramp/<reference>` — **our own page**, which fetches the
-   session's `client_secret` server-side and mounts Stripe's widget in an iframe.
-   - Against the **stub**, Stripe's scripts load and the widget mounts, but the session id is
-     not one Stripe knows, so the frame shows an error instead of a payment form. That is
+4. Submit. You land on `/checkout/onramp/<reference>` — **our own page**, which builds a signed
+   MoonPay widget URL server-side and frames it. The amount, asset and deposit address are all
+   locked by the signature.
+   - Against the **stub**, the frame points at MoonPay's real sandbox widget, but the
+     publishable key is a placeholder, so it shows an error instead of a payment form. That is
      expected, and everything either side of it has still been exercised.
-   - With **real sandbox credentials**, you get a working onramp and can complete it with the
-     test values in 3.2.
+   - With **real sandbox credentials**, you get a working on-ramp and can complete it with the
+     test cards in 3.2.
 5. Watch order status live at `http://localhost:3001/orders/<reference>` — it polls every 4
-   seconds and only changes when a **real, signature-verified webhook** arrives from Stripe.
-   The widget's own completion event navigates you there but never marks the order paid.
+   seconds and only changes when a **real, signature-verified webhook** arrives from MoonPay.
+   MoonPay's `redirectURL` navigates you there but never marks the order paid.
+6. Do the same through the **donation** flow at `http://localhost:3001/donate`. It is the
+   identical rail — same quote, same signed URL, same webhook, same state machine — so anything
+   that works for a purchase works for a donation and vice versa.
 
-Stripe cannot reach `localhost`. To see live status from a real sandbox checkout, run
-`stripe listen --forward-to localhost:3000/webhooks/stripe` and put the `whsec_` it prints into
-`STRIPE_ONRAMP_WEBHOOK_SECRET`. This is only needed for a real sandbox checkout — `pnpm smoke`
-(6.1) already proves the webhook logic without any tunnel.
+MoonPay cannot reach `localhost`. To see live status from a real sandbox checkout, expose the
+API over HTTPS (`cloudflared tunnel --url http://localhost:3000`) and register
+`https://…/webhooks/moonpay` in the MoonPay dashboard. This is only needed for a real sandbox
+checkout — `pnpm smoke` (6.1) already proves the webhook logic without any tunnel.
 
 ---
 
@@ -260,9 +271,11 @@ Stripe cannot reach `localhost`. To see live status from a real sandbox checkout
 | `psql: FATAL: database "payment_platform" does not exist` | Skipped step 5.2 |
 | API returns `401 Missing X-API-Key` | `PAYMENT_API_KEY` differs between `.env` and `apps/web/.env.local` |
 | Checkout says "No approved and active payout destination" | `pnpm db:seed` wasn't run, or you're using a merchant/asset/network combo other than the seeded ones (USDC/polygon, USDT/polygon) |
-| Order status never leaves `CREATED`/`CHECKOUT_OPENED` | No webhook has arrived yet — either you're on the stub (no real checkout happened), or Stripe can't reach your webhook URL (see the `stripe listen` note above) |
-| `pnpm smoke` fails on webhook checks | `STRIPE_ONRAMP_WEBHOOK_SECRET` in `.env` isn't set, or the API wasn't restarted after changing `.env` |
-| Order creation fails with `ECONNREFUSED` | `STRIPE_API_BASE_URL` points at the stub but the stub isn't running — `node scripts/stripe-stub.mjs` |
+| Order status never leaves `CREATED`/`CHECKOUT_OPENED` | No webhook has arrived yet — either you're on the stub (no real checkout happened), or MoonPay can't reach your webhook URL (see the tunnel note above) |
+| `pnpm smoke` fails on webhook checks | `MOONPAY_WEBHOOK_KEY` in `.env` isn't set, or the API wasn't restarted after changing `.env` |
+| Every real webhook returns 400 | You used `MOONPAY_SECRET_KEY` where `MOONPAY_WEBHOOK_KEY` belongs. They are different secrets |
+| API won't boot: "keys are from different environments" | A mixed set, e.g. `pk_live_` with `wk_test_` — take all three from the same dashboard environment |
+| Order creation fails with `ECONNREFUSED` | `MOONPAY_API_BASE_URL` points at the stub but the stub isn't running — `node scripts/moonpay-stub.mjs` |
 
 ---
 
@@ -275,4 +288,8 @@ Stripe cannot reach `localhost`. To see live status from a real sandbox checkout
 - [ ] `pnpm install && pnpm db:migrate && pnpm db:seed && pnpm build`
 - [ ] `pnpm api:dev` and `pnpm web:dev` both running
 - [ ] `pnpm smoke` passes
-- [ ] (optional) Stripe onramp application approved, sandbox keys in place, manual browser checkout completed
+- [ ] (optional) MoonPay sandbox keys in place (all three), webhook endpoint registered, manual browser checkout completed
+- [ ] (optional) The same walkthrough via `/donate`
+
+Deeper detail on credentials, going live and every provider-specific decision:
+[`docs/moonpay-onramp-migration.md`](docs/moonpay-onramp-migration.md).

@@ -7,6 +7,8 @@ import { isTerminal, type OrderStatus } from "@pp/shared-types";
 interface OrderSnapshot {
   reference: string;
   status: OrderStatus;
+  orderType: "PURCHASE" | "DONATION";
+  donationCampaign: string | null;
   fiatAmount: string;
   fiatCurrency: string;
   cryptoAsset: string;
@@ -33,6 +35,19 @@ const STATUS_COPY: Record<OrderStatus, { title: string; detail: string }> = {
   DISPUTED: { title: "Payment disputed", detail: "This order's payment has been disputed. Contact support for details." },
   CHARGEBACK_RECEIVED: { title: "Chargeback received", detail: "Contact support for details on this order." },
   REVERSED: { title: "Payment reversed", detail: "This payment was reversed. Contact support for details." },
+};
+
+/**
+ * Copy that differs for a donation. Everything else - the states, the polling,
+ * the fact that only a verified webhook advances anything - is identical,
+ * because it is literally the same order running the same rails.
+ */
+const DONATION_COPY: Partial<Record<OrderStatus, { title: string; detail: string }>> = {
+  CREATED: { title: "Donation started", detail: "Waiting for you to complete the payment step." },
+  PAYMENT_CONFIRMED: { title: "Payment received", detail: "Thank you. We are settling your gift to the programme wallet." },
+  COMPLETED: { title: "Thank you", detail: "Your donation is confirmed and settled to the programme." },
+  CANCELLED: { title: "Donation cancelled", detail: "This donation was cancelled. Nothing was charged." },
+  EXPIRED: { title: "Donation expired", detail: "This payment session expired. Please start again." },
 };
 
 const POLL_INTERVAL_MS = 4000;
@@ -97,17 +112,18 @@ export function OrderStatusTracker({ reference }: { reference: string }) {
     );
   }
 
-  const copy = STATUS_COPY[order.status];
+  const donation = order.orderType === "DONATION";
+  const copy = (donation ? DONATION_COPY[order.status] : undefined) ?? STATUS_COPY[order.status];
   const terminal = isTerminal(order.status);
 
   return (
     <section className="checkout-success">
       <div className="success-mark">{terminal && order.status === "COMPLETED" ? "✓" : "…"}</div>
-      <p className="eyebrow">{terminal ? "ORDER STATUS" : "PROCESSING"}</p>
+      <p className="eyebrow">{donation ? "DONATION STATUS" : terminal ? "ORDER STATUS" : "PROCESSING"}</p>
       <h1>{copy.title}</h1>
       <p>{copy.detail}</p>
       <div className="success-reference">
-        <span>Order reference</span>
+        <span>{donation ? "Donation reference" : "Order reference"}</span>
         <strong>{order.reference}</strong>
       </div>
       <div className="summary-total">
@@ -117,11 +133,12 @@ export function OrderStatusTracker({ reference }: { reference: string }) {
         </strong>
         <small>
           Settled as {order.cryptoAsset} on {order.network}
+          {donation && order.donationCampaign ? ` · ${order.donationCampaign.replace(/-/g, " ")}` : ""}
         </small>
       </div>
       {!terminal && <p className="secure-note">This page updates automatically - no need to refresh.</p>}
-      <Link className="btn" href="/products">
-        Continue Shopping
+      <Link className="btn" href={donation ? "/donate" : "/products"}>
+        {donation ? "Back to Donations" : "Continue Shopping"}
       </Link>
     </section>
   );

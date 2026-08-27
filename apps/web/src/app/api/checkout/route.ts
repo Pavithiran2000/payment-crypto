@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createOrder, PaymentApiError } from "@/lib/payment-api";
 import { getProduct } from "@/lib/catalog";
-import { SUPPORTED_FIAT_CURRENCIES, SUPPORTED_CRYPTO_OPTIONS } from "@/lib/payment-config";
+import { clientIp } from "@/lib/client-ip";
+import { SUPPORTED_CRYPTO_OPTIONS, fiatOption } from "@/lib/payment-config";
 import type { FiatCurrency, CryptoAsset, ChainNetwork } from "@pp/shared-types";
 
 interface CheckoutRequestBody {
@@ -13,22 +14,6 @@ interface CheckoutRequestBody {
   network?: unknown;
   customerEmail?: unknown;
   idempotencyKey?: unknown;
-}
-
-/**
- * The payer's IP, for Stripe's supportability check.
- *
- * Taken from the proxy headers rather than the body: a client-supplied IP would
- * let anyone claim a supported country. Only the first hop in `x-forwarded-for`
- * is used, and only when a trusted proxy actually sets it.
- */
-function clientIp(req: Request): string | undefined {
-  const forwarded = req.headers.get("x-forwarded-for");
-  const candidate = forwarded?.split(",")[0]?.trim() ?? req.headers.get("x-real-ip") ?? undefined;
-  if (!candidate) return undefined;
-  // Loopback tells Stripe nothing and trips its malformed-address validation.
-  if (candidate === "::1" || candidate.startsWith("127.")) return undefined;
-  return candidate;
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -57,8 +42,8 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "Invalid quantity" }, { status: 400 });
   }
 
-  const currency = typeof body.currency === "string" ? body.currency : "";
-  if (!(SUPPORTED_FIAT_CURRENCIES as string[]).includes(currency)) {
+  const fiat = typeof body.currency === "string" ? fiatOption(body.currency) : undefined;
+  if (!fiat) {
     return NextResponse.json({ error: "Unsupported currency" }, { status: 400 });
   }
 
@@ -74,7 +59,26 @@ export async function POST(req: Request): Promise<Response> {
   // the customer on the product page. What's re-derived server-side here is
   // the *total* from price x quantity, formatted deterministically to 2dp,
   // rather than trusting a client-formatted amount string directly.
-  const fiatAmount = (price * quantity).toFixed(2);
+  const total = price * quantity;
+  const fiatAmount = total.toFixed(2);
+
+  // MoonPay enforces a per-currency minimum and the gateway's quote call would
+  // surface the refusal - but as a 400 the customer sees only after committing
+  // to a checkout. Checking it here turns that into an answer they can act on.
+  if (total < fiat.minAmount) {
+    return NextResponse.json(
+      {
+        error: `The minimum card payment in ${fiat.code} is ${fiat.minAmount}. Increase the quantity or choose another currency.`,
+      },
+      { status: 400 },
+    );
+  }
+  if (total > fiat.maxAmount) {
+    return NextResponse.json(
+      { error: `The maximum card payment in ${fiat.code} is ${fiat.maxAmount}. Please contact us for larger orders.` },
+      { status: 400 },
+    );
+  }
 
   const idempotencyKey = typeof body.idempotencyKey === "string" && body.idempotencyKey.length >= 16
     ? body.idempotencyKey
@@ -84,32 +88,34 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const customerEmail = typeof body.customerEmail === "string" && body.customerEmail ? body.customerEmail : undefined;
-  const customerIpAddress = clientIp(req);
+  const customerIpAddress = clientIp(req.headers);
 
   try {
     const order = await createOrder({
       fiatAmount,
-      fiatCurrency: currency as FiatCurrency,
+      fiatCurrency: fiat.code as FiatCurrency,
       cryptoAsset: cryptoOption.asset as CryptoAsset,
       network: cryptoOption.network as ChainNetwork,
+      orderType: "PURCHASE",
       ...(customerEmail ? { customerEmail } : {}),
       ...(customerIpAddress ? { customerIpAddress } : {}),
       idempotencyKey,
     });
 
-    // Only the reference and where to go next. The onramp client secret stays
-    // on the server: the payment page fetches its own, server-side, at render.
+    // Only the reference and where to go next. The signed widget URL stays on
+    // the server in embedded mode: the payment page mints its own, server-side,
+    // bound to the IP of the request that renders it.
     return NextResponse.json({
       reference: order.reference,
       checkoutUrl:
-        order.onramp?.mode === "hosted" && order.checkoutUrl
+        order.onramp?.mode === "redirect" && order.checkoutUrl
           ? order.checkoutUrl
           : `/checkout/onramp/${encodeURIComponent(order.reference)}`,
     });
   } catch (err) {
     if (err instanceof PaymentApiError) {
       // The gateway's 400s are customer-actionable ("not available in your
-      // country", "currency not supported") and worth passing through verbatim;
+      // country", "below the minimum") and worth passing through verbatim;
       // everything else stays generic.
       const message =
         err.status === 400 && typeof (err.body as { message?: unknown } | undefined)?.message === "string"

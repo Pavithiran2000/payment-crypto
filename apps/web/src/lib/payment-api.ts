@@ -11,23 +11,36 @@ export class PaymentApiError extends Error {
   }
 }
 
-/** What the browser needs to mount Stripe's onramp widget. */
+/**
+ * What the browser needs to reach MoonPay.
+ *
+ * `widgetUrl` is signed over the deposit address, the amount, the asset and -
+ * when IP matching is on - a hash of the payer's IP. It is a bearer credential
+ * for one payment by one payer, so it is fetched server-side immediately before
+ * render and handed to exactly one component. It is never in the status API and
+ * never in a link the browser can share.
+ */
 export interface OnrampHandle {
-  sessionId: string;
-  clientSecret: string;
-  publishableKey: string;
-  mode: "embedded" | "hosted";
+  provider: "moonpay";
+  widgetUrl: string;
+  mode: "embedded" | "redirect";
 }
+
+export type OrderType = "PURCHASE" | "DONATION";
 
 export interface OrderResponse {
   reference: string;
   status: string;
+  orderType: OrderType;
+  donationCampaign: string | null;
   fiatAmount: string;
   fiatCurrency: string;
   cryptoAsset: string;
   network: string;
+  cryptoAmountQuoted: string | null;
   cryptoAmountSettled: string | null;
   chainTxHash: string | null;
+  quoteExpiresAt: string | null;
   checkoutUrl?: string;
   onramp?: OnrampHandle;
   createdAt: string;
@@ -38,9 +51,12 @@ export interface CreateOrderInput {
   fiatCurrency: FiatCurrency;
   cryptoAsset: CryptoAsset;
   network: ChainNetwork;
+  orderType?: OrderType;
+  donationCampaign?: string;
+  donorName?: string;
   customerEmail?: string;
   customerCountry?: string;
-  /** Lets Stripe reject an unsupported geography before the customer commits. */
+  /** Hashed into the widget URL so a signed URL cannot be reused elsewhere. */
   customerIpAddress?: string;
   idempotencyKey: string;
 }
@@ -87,14 +103,16 @@ export function getOrder(reference: string): Promise<OrderResponse> {
 }
 
 /**
- * Fetched server-side, immediately before rendering the onramp page.
+ * Fetched server-side, immediately before rendering the payment page.
  *
- * The client secret reaches the browser only inside that one page's props, and
- * only while the order is still payable - the gateway 404s a terminal order.
- * It is never exposed through the public order-status route.
+ * The payer's IP travels in a header, never a query string: an IP is personal
+ * data and query strings end up in access logs, proxy logs and browser history.
+ * The gateway hashes it into the signed URL so that URL only works from the
+ * browser it was minted for.
  */
-export function getOnrampHandle(reference: string): Promise<OnrampHandle> {
+export function getOnrampHandle(reference: string, customerIpAddress?: string): Promise<OnrampHandle> {
   return request<OnrampHandle>(`/orders/${encodeURIComponent(reference)}/onramp-session`, {
     method: "GET",
+    ...(customerIpAddress ? { headers: { "x-customer-ip": customerIpAddress } } : {}),
   });
 }

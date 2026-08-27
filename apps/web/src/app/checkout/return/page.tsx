@@ -8,15 +8,17 @@ export const metadata: Metadata = { title: "Processing your payment" };
 /**
  * A soft landing, not part of the normal flow.
  *
- * The embedded onramp keeps the customer on `/checkout/onramp/[reference]` and
- * moves them to the order page itself, so nothing routes here. It is kept for
- * two cases that do happen: a bookmark from the old hosted-redirect flow, and
- * the Stripe-hosted standalone page, which accepts no return URL at all - a
- * customer who finds their own way back needs somewhere sensible to land.
+ * MoonPay's `redirectURL` points at `/orders/:reference` directly - we know the
+ * reference when we mint the widget URL, so there is no reason to bounce the
+ * customer through a page that has to guess it. This route exists for the two
+ * cases that still happen: a bookmark from an earlier integration, and a
+ * customer who found their own way back after a 3DS or app-switch detour.
  *
  * Which query key would carry a reference is unknowable in advance, so this
- * checks the plausible ones and degrades gracefully. A botched return must
- * never be read as "not paid".
+ * checks the plausible ones and degrades gracefully. `transactionId` is
+ * deliberately absent from the list: it is MoonPay's identifier, not ours, and
+ * `/orders/:reference` would not resolve it. A botched return must never be
+ * read as "not paid".
  */
 export default async function CheckoutReturn({
   searchParams,
@@ -24,7 +26,7 @@ export default async function CheckoutReturn({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const query = await searchParams;
-  const candidateKeys = ["reference", "partner_order_id", "partnerOrderId", "orderId"];
+  const candidateKeys = ["reference", "externalTransactionId", "partnerOrderId", "orderId"];
   let reference: string | undefined;
   for (const key of candidateKeys) {
     const value = query[key];

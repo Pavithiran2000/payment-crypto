@@ -1,8 +1,9 @@
 import {
-  STRIPE_API_BASE_URL,
-  type StripeOnrampConfig,
-  type OnrampMode,
-} from '@pp/provider-stripe-onramp';
+  MOONPAY_API_BASE_URL,
+  resolveMoonPayConfig,
+  type MoonPayConfig,
+  type WidgetMode,
+} from '@pp/provider-moonpay';
 
 function required(name: string): string {
   const v = process.env[name];
@@ -10,13 +11,24 @@ function required(name: string): string {
   return v;
 }
 
+function optional(name: string): string | undefined {
+  const v = process.env[name];
+  return v && v.length > 0 ? v : undefined;
+}
+
+function boolean(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined || v === '') return fallback;
+  return v === 'true' || v === '1';
+}
+
 export interface AppConfig {
   port: number;
-  stripe: StripeOnrampConfig;
+  moonpay: MoonPayConfig;
   /**
-   * Base URL of the storefront that mounts the embedded onramp widget. The
-   * checkout URL handed back with a new order is built from this, so the
-   * customer stays on our domain for the whole payment.
+   * Base URL of the storefront. The checkout URL handed back with a new order
+   * and MoonPay's `redirectURL` are both built from this, so it must be the
+   * address the customer's browser can actually reach.
    */
   webBaseUrl: string;
   /** Retention window for contact PII, in days. See docs/pii-retention-policy.md. */
@@ -32,29 +44,31 @@ export function loadConfig(): AppConfig {
   required('PII_MASTER_KEK');
   required('PII_BLIND_INDEX_PEPPER');
 
-  const mode = process.env['STRIPE_ONRAMP_MODE'] ?? 'embedded';
-  if (mode !== 'embedded' && mode !== 'hosted') {
-    throw new Error('STRIPE_ONRAMP_MODE must be "embedded" or "hosted"');
+  const mode = process.env['MOONPAY_WIDGET_MODE'] ?? 'embedded';
+  if (mode !== 'embedded' && mode !== 'redirect') {
+    throw new Error('MOONPAY_WIDGET_MODE must be "embedded" or "redirect"');
   }
 
-  const secretKey = required('STRIPE_SECRET_KEY');
-  const apiBaseUrl = process.env['STRIPE_API_BASE_URL'] ?? STRIPE_API_BASE_URL;
+  const toleranceSeconds = optional('MOONPAY_WEBHOOK_TOLERANCE_SECONDS');
 
-  // A live key pointed at anything but Stripe means either a misconfiguration
-  // or an exfiltration attempt. Neither should be allowed to reach a request.
-  if (secretKey.startsWith('sk_live_') && apiBaseUrl !== STRIPE_API_BASE_URL) {
-    throw new Error('STRIPE_API_BASE_URL may not be overridden with a live secret key');
-  }
+  // resolveMoonPayConfig does the real validation: all three keys present, all
+  // three from the same environment, and no base-URL override once they are live.
+  const moonpay = resolveMoonPayConfig({
+    publishableKey: required('MOONPAY_PUBLISHABLE_KEY'),
+    secretKey: required('MOONPAY_SECRET_KEY'),
+    webhookKey: required('MOONPAY_WEBHOOK_KEY'),
+    mode: mode as WidgetMode,
+    apiBaseUrl: process.env['MOONPAY_API_BASE_URL'] ?? MOONPAY_API_BASE_URL,
+    widgetBaseUrl: optional('MOONPAY_WIDGET_BASE_URL'),
+    requireIpMatch: boolean('MOONPAY_REQUIRE_IP_MATCH', false),
+    ...(toleranceSeconds ? { webhookToleranceMs: Number(toleranceSeconds) * 1000 } : {}),
+    theme: optional('MOONPAY_THEME') as 'light' | 'dark' | undefined,
+    themeId: optional('MOONPAY_THEME_ID'),
+  });
 
   return {
     port: Number(process.env['PORT'] ?? 3000),
-    stripe: {
-      secretKey,
-      publishableKey: required('STRIPE_PUBLISHABLE_KEY'),
-      webhookSecret: required('STRIPE_ONRAMP_WEBHOOK_SECRET'),
-      mode: mode as OnrampMode,
-      apiBaseUrl,
-    },
+    moonpay,
     webBaseUrl: (process.env['WEB_BASE_URL'] ?? 'http://localhost:3001').replace(/\/+$/, ''),
     amlRetentionDays: Number(process.env['AML_RETENTION_DAYS'] ?? 1825),
     apiKey: required('PAYMENT_API_KEY'),

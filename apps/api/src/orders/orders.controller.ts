@@ -26,7 +26,7 @@ export class OrdersController {
 
   /**
    * Status is read from our record, which is only ever advanced by a verified
-   * webhook. The browser's return from the onramp is a navigation event, not a
+   * webhook. The browser's return from MoonPay is a navigation event, not a
    * source of truth - it never marks an order complete.
    */
   @Get(':reference')
@@ -35,12 +35,19 @@ export class OrdersController {
   }
 
   /**
-   * Separate from the order projection so a client secret is only ever served
-   * to a caller that explicitly asked for one, and only while the order is
-   * still payable.
+   * Separate from the order projection so a signed widget URL is only ever
+   * served to a caller that explicitly asked for one, and only while the order
+   * is still payable.
+   *
+   * The payer's IP arrives in a header rather than a query parameter on purpose:
+   * an IP is personal data, and query strings end up in access logs, proxy logs
+   * and browser history. The BFF sets it; the browser never does.
    */
   @Get(':reference/onramp-session')
-  async onrampSession(@Param('reference') reference: string) {
-    return this.orders.findOnrampHandle(reference);
+  async onrampSession(
+    @Param('reference') reference: string,
+    @Headers('x-customer-ip') customerIp?: string,
+  ) {
+    return this.orders.findOnrampHandle(reference, customerIp);
   }
 }

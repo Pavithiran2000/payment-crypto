@@ -116,18 +116,29 @@ const MAIN_SEQUENCE: readonly OrderStatus[] = [
 /**
  * Edges off the happy path. Every one is deliberate and enumerated.
  *
- * `KYC_FAILED` is reachable from every pre-settlement state, not only from
- * `KYC_PENDING`. On a provider that screens the payer inside its own hosted
- * flow (Stripe onramp: one `rejected` status covering KYC failure, sanctions
- * screening and fraud checks) we never observe a `KYC_PENDING` of our own -
- * the rejection lands directly on whatever state the order was in. Requiring
- * `KYC_PENDING` first would route every legitimately-rejected payer to
- * MANUAL_REVIEW instead of recording why they were declined.
+ * Every pre-settlement failure - `KYC_FAILED`, `CARD_DECLINED`,
+ * `PAYMENT_FAILED` - is reachable from every pre-settlement state, not only
+ * from the step that nominally precedes it.
+ *
+ * On a provider that runs the whole payment inside its own hosted flow, we do
+ * not observe the intermediate states at all: the failure lands directly on
+ * whatever state the order was last in. MoonPay is exactly that shape. A card
+ * declined at its first stage produces `transaction_failed` as the FIRST event
+ * we ever receive, against an order still sitting in `CREATED` - there was no
+ * `PAYMENT_PENDING` because the customer never got past authorisation.
+ *
+ * Requiring the nominal predecessor first would route every ordinary declined
+ * card into MANUAL_REVIEW instead of recording why it was declined - burying a
+ * routine outcome in the queue reserved for money that might be missing.
+ *
+ * > **This was a real bug the smoke test caught.** The first MoonPay build
+ * > allowed only `KYC_FAILED` out of `CREATED`, so declines and payment
+ * > failures were reported as illegal transitions.
  */
 const ALLOWED: Record<OrderStatus, readonly OrderStatus[]> = {
-  CREATED: ['KYC_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
-  CHECKOUT_OPENED: ['KYC_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
-  KYC_PENDING: ['KYC_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
+  CREATED: ['KYC_FAILED', 'CARD_DECLINED', 'PAYMENT_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
+  CHECKOUT_OPENED: ['KYC_FAILED', 'CARD_DECLINED', 'PAYMENT_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
+  KYC_PENDING: ['KYC_FAILED', 'CARD_DECLINED', 'PAYMENT_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
   PAYMENT_PENDING: ['KYC_FAILED', 'CARD_DECLINED', 'PAYMENT_FAILED', 'CANCELLED', 'EXPIRED', 'MANUAL_REVIEW'],
   PAYMENT_CONFIRMED: ['CONVERSION_FAILED', 'MANUAL_REVIEW', 'DISPUTED'],
   CRYPTO_CONVERTED: ['CRYPTO_TRANSFER_FAILED', 'MANUAL_REVIEW', 'DISPUTED'],

@@ -14,6 +14,10 @@ export async function GET(
     return NextResponse.json({
       reference: order.reference,
       status: order.status,
+      // Lets the status page tell a donor "thank you" rather than "your order
+      // is confirmed". Not sensitive: the customer chose it moments ago.
+      orderType: order.orderType,
+      donationCampaign: order.donationCampaign,
       fiatAmount: order.fiatAmount,
       fiatCurrency: order.fiatCurrency,
       cryptoAsset: order.cryptoAsset,
