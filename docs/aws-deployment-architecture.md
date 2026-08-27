@@ -286,6 +286,20 @@ upstream pp_api {
     keepalive 32;
 }
 
+# The Next.js BFF calls this loopback-only listener. Pointing
+# PAYMENT_API_URL here means it also benefits from the two-process API pool;
+# pointing it directly at :3000 would make that one process a hidden SPOF.
+server {
+    listen 127.0.0.1:8080;
+
+    location / {
+        proxy_pass http://pp_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+    }
+}
+
 # HTTP -> HTTPS, except the ACME challenge certbot needs.
 server {
     listen 80;
@@ -297,9 +311,10 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    # This syntax works on the nginx versions shipped by both Ubuntu 22.04
+    # and 24.04. Newer nginx versions may prefer a separate `http2 on` line.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name pay.example.com;
 
     ssl_certificate     /etc/letsencrypt/live/pay.example.com/fullchain.pem;
@@ -352,6 +367,11 @@ server {
     }
 }
 ```
+
+Set `PAYMENT_API_URL=http://127.0.0.1:8080` in the application environment.
+Do **not** route public `/api/*` to NestJS: this repository owns
+`/api/checkout` and `/api/donate` in Next.js. Only `/orders*` and
+`/webhooks/*` go directly to the API.
 
 > **If you put Cloudflare in front**, `$remote_addr` becomes a Cloudflare IP. Install [Cloudflare's real-IP ranges](https://www.cloudflare.com/ips/) via `set_real_ip_from` + `real_ip_header CF-Connecting-IP`, or MoonPay's IP matching will bind to Cloudflare's address instead of the payer's and every live payment will fail.
 
@@ -412,136 +432,499 @@ aws ec2 modify-instance-credit-specification \
 
 Then allocate an **Elastic IP** and associate it, so the address survives a stop/start. (An EIP attached to a running instance costs the same $3.65/mo as the auto-assigned one — no extra charge, and you get stability.)
 
-### 7.2 Base system + swap
+### 7.2 Post-launch assumptions and paths
+
+The commands below are the complete runbook after EC2 has launched. They use
+the normal Ubuntu login account for cloning, building, and running the services:
+
+```text
+Linux user    ubuntu
+Repository    /srv/payment-platform/payment-crypto
+API ports     3000 and 3010
+Web ports     3001 and 3011
+Internal API  127.0.0.1:8080 (nginx pool used by the Next.js BFF)
+Public ports  80 and 443 only
+PostgreSQL    127.0.0.1:5432 only
+```
+
+Running as `ubuntu` is simpler for this sandbox deployment. Never run the Node
+services as `root`, and never expose their ports or PostgreSQL in the EC2
+security group.
+
+### 7.3 Base system, Node.js, firewall, and swap
+
+Connect as `ubuntu`, then run:
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y nginx postgresql postgresql-contrib git curl unattended-upgrades
+uname -m                       # must print aarch64 on t4g
 
-# Node 22 (matches the repo's engines requirement)
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y nginx postgresql postgresql-contrib git curl \
+  certbot python3-certbot-nginx unattended-upgrades ufw
+
+# Node 22 matches the repository's engines requirement.
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
-sudo npm i -g pnpm@9.12.0
+sudo npm install -g pnpm@9.12.0
 
-# 2 GB swap. Non-negotiable on a 2 GiB box - it is the difference between
-# a slow moment and the OOM killer terminating Postgres mid-transaction.
-sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
-sudo mkswap /swapfile && sudo swapon /swapfile
+node --version
+pnpm --version
+
+# Create swap once. Do not rerun these lines if /swapfile already exists.
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf
 
-sudo dpkg-reconfigure -plow unattended-upgrades   # automatic security patches
+# Keep SSH open before enabling the host firewall.
+sudo ufw allow OpenSSH
+sudo ufw allow 'Nginx Full'
+sudo ufw --force enable
+
+sudo dpkg-reconfigure -plow unattended-upgrades
 ```
 
-### 7.3 PostgreSQL, tuned for 2 GiB
-
-Defaults assume a dedicated server and will fight the apps for memory.
+Verify the swap:
 
 ```bash
-sudo -u postgres psql -c "CREATE DATABASE payment_platform;"
-sudo -u postgres psql -c "CREATE USER pp WITH PASSWORD 'use-a-real-generated-password';"
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE payment_platform TO pp;"
+free -h
+swapon --show
 ```
 
-In `/etc/postgresql/*/main/postgresql.conf`:
+### 7.4 GitHub SSH access and clone
+
+Create a named GitHub key under the `ubuntu` account. The private key stays on
+the instance and must never be copied into the repository:
+
+```bash
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+
+ssh-keygen -t ed25519 \
+  -C "skspavithiran@gmail.com" \
+  -f ~/.ssh/github_payment_platform
+```
+
+For unattended deployments, leave the passphrase empty. Display the public key:
+
+```bash
+cat ~/.ssh/github_payment_platform.pub
+```
+
+Add that public key in GitHub under **Settings → SSH and GPG keys**, or add it
+as a read-only repository **Deploy key**. Then put this in `~/.ssh/config`:
+
+```sshconfig
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/github_payment_platform
+    IdentitiesOnly yes
+```
+
+Apply permissions and test authentication:
+
+```bash
+chmod 600 ~/.ssh/config ~/.ssh/github_payment_platform
+chmod 644 ~/.ssh/github_payment_platform.pub
+ssh -T git@github.com
+```
+
+Clone the repository, replacing the GitHub owner and repository placeholders:
+
+```bash
+sudo mkdir -p /srv/payment-platform
+sudo chown ubuntu:ubuntu /srv/payment-platform
+
+git clone git@github.com:GITHUB_OWNER/GITHUB_REPOSITORY.git \
+  /srv/payment-platform/payment-crypto
+
+cd /srv/payment-platform/payment-crypto
+git status
+git branch -a
+```
+
+If the clone already exists, do not clone again:
+
+```bash
+cd /srv/payment-platform/payment-crypto
+git fetch --prune origin
+git switch main
+git pull --ff-only origin main
+```
+
+### 7.5 PostgreSQL, tuned for 2 GiB
+
+Create the login first and make it the database owner. Using `\password` avoids
+putting the database password in shell history:
+
+```bash
+sudo -u postgres psql
+```
+
+At the PostgreSQL prompt:
+
+```sql
+CREATE ROLE pp LOGIN;
+\password pp
+CREATE DATABASE payment_platform OWNER pp;
+\q
+```
+
+Use a long alphanumeric password so it can be placed in `DATABASE_URL` without
+URL encoding. Find the active configuration file:
+
+```bash
+sudo -u postgres psql -tAc "SHOW config_file;"
+```
+
+Open the returned file with `sudoedit` and set:
 
 ```conf
-listen_addresses = 'localhost'   # loopback ONLY - never expose 5432
-shared_buffers = 256MB           # ~12% of RAM, not the usual 25%: the apps need it
+listen_addresses = 'localhost'
+shared_buffers = 256MB
 effective_cache_size = 768MB
 work_mem = 8MB
 maintenance_work_mem = 64MB
-max_connections = 40             # DB_POOL_MAX=10 per app process x 4 = 40
+max_connections = 40
 ```
 
-`listen_addresses = 'localhost'` is the important line. With everything on one box the database has no reason to accept a network connection, and not listening is stronger than any firewall rule.
+Only the two API processes use database pools: `DB_POOL_MAX=10` therefore uses
+at most 20 application connections, leaving headroom for migrations and admin
+access. Restart and verify PostgreSQL:
 
-### 7.4 Build strategy — build off-box
-
-**Do not run `next build` on the instance.** It is the single heaviest thing this project does and will contend with (or OOM) your running services.
-
-Add to [`apps/web/next.config.ts`](../apps/web/next.config.ts):
-
-```ts
-const nextConfig: NextConfig = {
-  output: "standalone",   // ships a minimal self-contained server bundle
-};
+```bash
+sudo systemctl restart postgresql
+sudo systemctl enable postgresql
+sudo ss -lntp | grep 5432
 ```
 
-`output: "standalone"` matters a lot here: without it you must ship the full `node_modules` tree (hundreds of MB) to a 12 GB disk. With it, Next emits only the files actually reachable at runtime.
+The listener must show only loopback (`127.0.0.1` and/or `::1`), never
+`0.0.0.0:5432`.
 
-Then build in **GitHub Actions** (free tier covers this comfortably) and ship artifacts via `rsync`/`scp`, or `git pull && pnpm build` during a maintenance window if you prefer on-box builds and have the swap for it.
+### 7.6 Application environment
 
-### 7.5 systemd units
+Create the root environment file:
 
-Four units — two processes per app, so nginx has a pool to balance across and you can restart them one at a time.
+```bash
+cd /srv/payment-platform/payment-crypto
+cp .env.example .env
+nano .env
+```
 
-`/etc/systemd/system/pp-api@.service`:
+Use this complete sandbox shape, replacing every placeholder:
+
+```dotenv
+# PostgreSQL
+DATABASE_URL=postgresql://pp:YOUR_DB_PASSWORD@127.0.0.1:5432/payment_platform
+DB_POOL_MAX=10
+DB_SSL=false
+
+# Generate each separately with: openssl rand -base64 32
+PII_MASTER_KEK=YOUR_32_BYTE_BASE64_KEK
+PII_BLIND_INDEX_PEPPER=YOUR_32_BYTE_BASE64_PEPPER
+
+# All three keys must come from the same MoonPay environment.
+MOONPAY_PUBLISHABLE_KEY=YOUR_MOONPAY_TEST_PUBLISHABLE_KEY
+MOONPAY_SECRET_KEY=YOUR_MOONPAY_TEST_SECRET_KEY
+MOONPAY_WEBHOOK_KEY=YOUR_MOONPAY_TEST_WEBHOOK_KEY
+MOONPAY_WIDGET_MODE=embedded
+MOONPAY_REQUIRE_IP_MATCH=false
+MOONPAY_WEBHOOK_TOLERANCE_SECONDS=3600
+
+# Public HTTPS origin. Do not include a trailing slash.
+WEB_BASE_URL=https://pay.example.com
+AML_RETENTION_DAYS=1825
+
+# Do not set PORT in this file. The pp-api@ systemd template supplies each
+# instance's port explicitly (3000 or 3010).
+
+# Shared only by the Next.js server and NestJS API. Generate with:
+# openssl rand -hex 32
+PAYMENT_API_KEY=YOUR_RANDOM_INTERNAL_API_KEY
+
+# Loopback nginx balances Next.js BFF calls across both API processes.
+PAYMENT_API_URL=http://127.0.0.1:8080
+
+# This UUID exists only after the repository's sandbox seed is applied.
+PAYMENT_MERCHANT_ID=11111111-1111-1111-1111-111111111111
+```
+
+Generate the three random values with separate commands:
+
+```bash
+openssl rand -base64 32     # PII_MASTER_KEK
+openssl rand -base64 32     # PII_BLIND_INDEX_PEPPER
+openssl rand -hex 32        # PAYMENT_API_KEY
+```
+
+Protect the file:
+
+```bash
+sudo chown ubuntu:ubuntu /srv/payment-platform/payment-crypto/.env
+chmod 600 /srv/payment-platform/payment-crypto/.env
+```
+
+This `.env` procedure is for sandbox/staging. Before production, move the KEK,
+blind-index pepper, MoonPay secrets, and internal API key to SSM Parameter Store
+`SecureString` parameters and inject them at service startup. The application
+still receives them as environment variables, but they no longer live in the
+Git checkout.
+
+### 7.7 Install, migrate, seed, and build
+
+The first build can run on the instance after the 2 GiB swap is active:
+
+```bash
+cd /srv/payment-platform/payment-crypto
+pnpm install --frozen-lockfile
+pnpm db:migrate
+
+# SANDBOX ONLY. This inserts demonstration merchants and wallet addresses.
+pnpm db:seed
+
+pnpm build
+```
+
+Do not run `pnpm db:seed` in production. The current
+[`apps/web/next.config.ts`](../apps/web/next.config.ts) does not enable Next.js
+standalone output, so this runbook intentionally keeps `node_modules` and starts
+Next through its installed server binary. GitHub Actions plus versioned release
+directories is the preferred later improvement; it avoids building on the 2 GiB
+host and enables genuinely atomic deployments.
+
+### 7.8 systemd API configuration
+
+Create `/etc/systemd/system/pp-api@.service`:
 
 ```ini
 [Unit]
 Description=Payment Platform API (port %i)
-After=network.target postgresql.service
+After=network-online.target postgresql.service
+Wants=network-online.target
 Requires=postgresql.service
 
 [Service]
 Type=simple
-User=pp
-WorkingDirectory=/srv/payment-platform
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/srv/payment-platform/payment-crypto
+EnvironmentFile=/srv/payment-platform/payment-crypto/.env
 Environment=NODE_ENV=production
-Environment=PORT=%i
-EnvironmentFile=/srv/payment-platform/.env
-ExecStart=/usr/bin/node apps/api/dist/main.js
+# /usr/bin/env deliberately overrides any accidental PORT inherited elsewhere.
+ExecStart=/usr/bin/env PORT=%i /usr/bin/node /srv/payment-platform/payment-crypto/apps/api/dist/main.js
 Restart=always
 RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
 
-# Hardening. The KEK and MoonPay secret key live in this process.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/srv/payment-platform
 
 [Install]
 WantedBy=multi-user.target
 ```
 
+### 7.9 systemd web configuration
+
+Create `/etc/systemd/system/pp-web@.service`:
+
+```ini
+[Unit]
+Description=Payment Platform Web (port %i)
+After=network-online.target pp-api@3000.service pp-api@3010.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/srv/payment-platform/payment-crypto
+EnvironmentFile=/srv/payment-platform/payment-crypto/.env
+Environment=NODE_ENV=production
+Environment=PORT=%i
+ExecStart=/usr/bin/node /srv/payment-platform/payment-crypto/apps/web/node_modules/next/dist/bin/next start /srv/payment-platform/payment-crypto/apps/web --port %i
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/payment-platform/payment-crypto/apps/web/.next/cache
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Load and start all four instances:
+
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl enable --now pp-api@3000 pp-api@3010
 sudo systemctl enable --now pp-web@3001 pp-web@3011
+
+sudo systemctl status pp-api@3000 --no-pager
+sudo systemctl status pp-api@3010 --no-pager
+sudo systemctl status pp-web@3001 --no-pager
+sudo systemctl status pp-web@3011 --no-pager
 ```
 
-The `@` template means one file serves both ports. A rolling restart is then simply:
+If `/usr/bin/node` is not the result of `command -v node`, use the returned
+absolute path in both units.
+
+### 7.10 nginx bootstrap and TLS
+
+The final nginx configuration in §5.3 references a certificate that does not
+exist yet. Start with this temporary HTTP-only file at
+`/etc/nginx/sites-available/payment-platform`:
+
+```nginx
+upstream pp_web_bootstrap {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3011;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name pay.example.com;
+
+    location / {
+        proxy_pass http://pp_web_bootstrap;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Replace `pay.example.com`, enable the site, and validate it:
 
 ```bash
-sudo systemctl restart pp-api@3000 && sleep 5 && sudo systemctl restart pp-api@3010
+sudo ln -s /etc/nginx/sites-available/payment-platform \
+  /etc/nginx/sites-enabled/payment-platform
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl enable --now nginx
+sudo systemctl reload nginx
 ```
 
-nginx routes around each one while it restarts — zero-downtime deploys on a single box.
-
-### 7.6 TLS
+The domain's DNS `A` record must now point to the EC2 Elastic IP, and ports 80
+and 443 must be open in `sg-pp-web`. If using Cloudflare, leave the record DNS
+only (grey cloud) until the certificate has been issued. Obtain the certificate:
 
 ```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d pay.example.com
+sudo certbot certonly --nginx -d pay.example.com
 ```
 
-Certbot installs a renewal timer automatically. Verify with `sudo certbot renew --dry-run`. Free, auto-renewing, 90-day certs.
-
-*(Skip this if you use Cloudflare proxied mode with an Origin Certificate — but Full (strict) still requires a valid cert on the origin, so certbot is the simpler path.)*
-
-### 7.7 Secrets
-
-**`PII_MASTER_KEK` must not sit in a plaintext `.env` on a public-subnet box.** [`pii-retention-policy.md`](pii-retention-policy.md) is explicit that env-var key material is local-dev only, and this is exactly the deployment where that stops being acceptable.
-
-Minimum viable improvement at $0: **AWS SSM Parameter Store, SecureString type** — free for standard parameters, encrypted with a KMS key (the AWS-managed one is free). Give the instance an IAM role with `ssm:GetParameter` on that path only, and fetch at boot:
+Now replace the temporary file with the complete §5.3 configuration, substituting
+the same domain in `server_name`, `ssl_certificate`, and
+`ssl_certificate_key`, then run:
 
 ```bash
-aws ssm get-parameter --name /pp/prod/PII_MASTER_KEK --with-decryption \
-  --query Parameter.Value --output text
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot renew --dry-run
 ```
 
-This costs nothing, removes the secret from disk, and gives you an audit trail via CloudTrail. Secrets Manager does the same with rotation for $0.40/secret/mo — over budget for several secrets, but worth it later.
+If Cloudflare proxying is enabled afterward, use **SSL/TLS → Full (strict)** and
+configure Cloudflare's published IP ranges with `set_real_ip_from` plus:
+
+```nginx
+real_ip_header CF-Connecting-IP;
+real_ip_recursive on;
+```
+
+Do not trust `CF-Connecting-IP` from arbitrary sources: every
+`set_real_ip_from` entry must be one of Cloudflare's official ranges. This is
+required before live MoonPay IP matching is enabled.
+
+### 7.11 Deployment verification
+
+Check local listeners and services:
+
+```bash
+sudo ss -lntp
+curl -I http://127.0.0.1:3001
+curl -I http://127.0.0.1:3011
+curl -i http://127.0.0.1:3000/
+curl -i http://127.0.0.1:3010/
+curl -I https://pay.example.com
+```
+
+A NestJS `404` at the API root is expected and proves that the API answered.
+Ports 3000, 3010, 3001, 3011, 5432, and 8080 must not be present in the EC2
+security group's inbound rules.
+
+Inspect logs if any check fails:
+
+```bash
+sudo journalctl -u pp-api@3000 -n 100 --no-pager
+sudo journalctl -u pp-api@3010 -n 100 --no-pager
+sudo journalctl -u pp-web@3001 -n 100 --no-pager
+sudo journalctl -u pp-web@3011 -n 100 --no-pager
+sudo tail -n 100 /var/log/nginx/error.log
+```
+
+Complete the external setup:
+
+1. Register `pay.example.com` under MoonPay **Developers → General → App or
+   website domains**.
+2. Register `https://pay.example.com/webhooks/moonpay` as the webhook URL.
+3. Run the Singapore quote/IP test from §1.6.
+4. Complete one sandbox purchase end to end.
+5. Set the AWS billing alarm and uptime monitor from §8.
+
+### 7.12 Updating from GitHub
+
+This simple in-place process has a short maintenance window. Versioned release
+directories are required for a truly zero-downtime build-and-switch workflow.
+
+```bash
+cd /srv/payment-platform/payment-crypto
+git status                         # must be clean
+git fetch --prune origin
+git switch main
+git pull --ff-only origin main
+
+sudo systemctl stop pp-web@3001 pp-web@3011
+sudo systemctl stop pp-api@3000 pp-api@3010
+
+pnpm install --frozen-lockfile
+pnpm build
+pnpm db:migrate
+
+sudo systemctl start pp-api@3000 pp-api@3010
+sudo systemctl start pp-web@3001 pp-web@3011
+sudo nginx -t
+curl -I https://pay.example.com
+```
+
+Never run the sandbox seed during a routine deployment.
+
+### 7.13 Production secrets
+
+**`PII_MASTER_KEK` must not remain in a plaintext `.env` on a public-subnet
+production box.** [`pii-retention-policy.md`](pii-retention-policy.md) is
+explicit that file-based key material is a local/sandbox compromise.
+
+The minimum $0 improvement is AWS SSM Parameter Store with `SecureString`
+parameters encrypted by the AWS-managed KMS key. Give the instance an IAM role
+with `ssm:GetParameter` only for the `/pp/prod/*` path and fetch secrets at boot.
+Secrets Manager adds built-in rotation for $0.40/secret/month and is a later
+upgrade. Do not print decrypted values into deployment logs or write them into
+the Git repository.
 
 ---
 
