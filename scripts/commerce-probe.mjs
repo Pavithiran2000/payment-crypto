@@ -41,6 +41,10 @@ function readEnvFile(url) {
 
 const fileEnv = readEnvFile(new URL('../.env', import.meta.url));
 const API_KEY = process.env.HELIO_API_KEY ?? fileEnv.HELIO_API_KEY;
+// Several endpoints (e.g. /v1/wallet/all) require BOTH the public key as an
+// `apiKey` query parameter AND the secret as a bearer token - they answer
+// {"message":"Please provide apiKey and bearer token"} with only one of them.
+const SECRET_KEY = process.env.HELIO_SECRET_KEY ?? fileEnv.HELIO_SECRET_KEY;
 
 // Sandbox by default. Override only when you deliberately want production.
 const BASE = process.env.HELIO_BASE_URL ?? 'https://api.dev.hel.io';
@@ -100,7 +104,11 @@ async function api(path, init = {}) {
   const url = `${BASE}${path}${path.includes('?') ? '&' : '?'}apiKey=${encodeURIComponent(API_KEY)}`;
   const res = await fetch(url, {
     ...init,
-    headers: { 'content-type': 'application/json', ...init.headers },
+    headers: {
+      'content-type': 'application/json',
+      ...(SECRET_KEY ? { authorization: `Bearer ${SECRET_KEY}` } : {}),
+      ...init.headers,
+    },
   });
   const text = await res.text();
   let body;
@@ -179,25 +187,27 @@ async function main() {
     console.log(`          ${String(w.blockchainEngineType).padEnd(6)} ${String(w.walletCategory ?? '').padEnd(10)} ${w.name ?? ''}  id=${w.id}`);
   }
 
-  const btcWallet = wallets.find((w) => w.blockchainEngineType === 'BTC');
+  const wantEngine = btc.blockchain?.engine?.type;
+  const btcWallet = wallets.find((w) => w.blockchainEngineType === wantEngine);
   if (!btcWallet) {
     fail(
-      'no BTC wallet configured',
+      `no ${wantEngine} wallet configured (needed for ${WANT_RECIPIENT})`,
       'Add one in the dashboard under Settings -> Wallets, then re-run. ' +
         'For sandbox use a TESTNET address you control - not a Binance address ' +
         '(Binance issues no testnet BTC addresses; see the assessment doc §5.2).',
     );
   }
-  console.log(`\n  ok    BTC wallet found: id=${btcWallet.id}`);
+  console.log(`\n  ok    ${wantEngine} wallet found: id=${btcWallet.id}`);
 
   // --- 3. the actual question --------------------------------------------
   const price = toBaseUnits('30.00', usd.decimals);
-  console.log(`\n  ..    creating pay link: $30.00 USD priced (${price} base units) -> BTC recipient, card enabled`);
+  console.log(`\n  ..    creating pay link: 30.00 ${WANT_PRICING} priced (${price} base units) -> ${WANT_RECIPIENT} recipient, card enabled`);
 
   const created = await api('/v1/paylink/create/api-key', {
     method: 'POST',
     body: JSON.stringify({
       name: `Commerce probe - card to ${WANT_RECIPIENT}`,
+      description: `Sandbox probe: $30.00 USD priced, settling to native ${WANT_RECIPIENT}. Tests whether the card on-ramp is offered for a ${WANT_RECIPIENT} recipient. Not a real product - safe to ignore.`,
       price,
       pricingCurrency: usd.id,
       features: {

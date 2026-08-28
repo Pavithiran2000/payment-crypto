@@ -18,7 +18,7 @@ It may also **dissolve the payer ≠ beneficiary problem** that [`README.md`](..
 |---|---|---|---|
 | Card payments | ❌ bank wire only | ✅ | ✅ |
 | Native BTC | ❌ stablecoins only | ✅ | ✅ |
-| Binance address as destination | ❌ proof-of-ownership blocks it | ✅ likely, via withdrawal | ⚠️ third-party deposit |
+| Binance address as destination | ❌ proof-of-ownership blocks it | ⚠️ `WITHDRAWAL_DESTINATION` confirmed on production BTC (§5.2-RESULT-2); exchange-address acceptance still unconfirmed | ⚠️ third-party deposit |
 | Anonymous checkout | ❌ pre-onboarded customers | ✅ | ✅ |
 | Build effort from here | full rewrite | **moderate rewrite** | **small change** |
 
@@ -78,7 +78,7 @@ That last setting matters a lot here: it means a Commerce checkout can be config
 Three flags carry the weight:
 
 - **`PAYMENT_RECIPIENT`** — the merchant can *receive* in BTC (only 48 of 450 currencies can).
-- **`WITHDRAWAL_DESTINATION`** — funds can be withdrawn *to* a BTC address. **This is the Binance path.**
+- **`WITHDRAWAL_DESTINATION`** — funds can be withdrawn *to* a BTC address. **This is the Binance path.** Present in **production only** — sandbox BTC lacks it, so this leg cannot be rehearsed before going live (§5.2-RESULT-2).
 - **`PAYMENT_PRICING`** — a charge can be denominated in BTC.
 
 **And a useful safety property:** native BTC is the **only** currency on the `BITCOIN` chain in the entire catalogue. The wrapped variants — `cbBTC`, `BBTC`, `BTCB`, `tBTC` — all live on EVM chains with `0x…` addresses. Selecting `mintAddress: "btc"` is therefore unambiguous; there is no way to accidentally pick a wrapped token *on the Bitcoin chain*, because none exists.
@@ -216,6 +216,83 @@ HELIO_API_KEY=<sandbox public key> node scripts/commerce-probe.mjs
 ```
 
 Note that `canPayWithCard` is a **pay-link feature flag**, so there are three distinct outcomes and all are informative: the API rejects the combination (clear no), the API accepts but echoes `canPayWithCard: false` (silently downgraded — also a no), or the checkout genuinely renders a card option (yes).
+
+### 5.2-RESULT — probe run 2026-08-28: INCONCLUSIVE, and why that is still useful
+
+The probe was run against a real sandbox account. Outcome:
+
+| Check | Result |
+|---|---|
+| Native BTC as `PAYMENT_RECIPIENT` in sandbox | ✅ present |
+| Fiat (USD) pricing | ✅ `$30 USD`, priced in 6-decimal base units (`30000000`) |
+| Pay link creation with `canPayWithCard: true`, BTC recipient | ✅ **accepted**, HTTP 201 |
+| Server echoed `canPayWithCard` | ✅ **`true`** — not silently downgraded |
+| Checkout page renders | ✅ `$30 USD` → `0.00037627 BTC`, recipient `tb1qt8…6az` (correct testnet address, linked to mempool.space/testnet) |
+| **A "Pay with card" option in the checkout** | ❌ **absent.** Only `Connect Wallet` |
+| **CONTROL: same paylink with USDC recipient** | ❌ **also absent.** Only `Connect Wallet` and `Pay with QR` |
+
+**The control is what matters.** Per §5.2a's decision rule, card appearing for *neither* BTC nor USDC means this is a **devnet limitation, not a BTC limitation** — the card/on-ramp flow simply is not wired into `app.dev.hel.io`. It says nothing either way about whether card → BTC works in production.
+
+**So gate §5.2 is neither cleared nor failed. It is blocked by the test environment**, exactly as §5.2a warned it might be.
+
+**What the run did establish, which is not nothing:**
+
+- Native BTC is a **fully working payment recipient** in Commerce — paylink, live fiat→BTC conversion, correct testnet address handling, block-explorer link. That was previously unverified.
+- The API **accepts and preserves** `canPayWithCard: true` on a BTC-recipient paylink. If card→BTC were categorically unsupported, silently forcing the flag to `false` would be the natural place to reject it — and it did not.
+- Fiat-denominated pricing works with BTC settlement, which is the model this platform needs.
+
+**Remaining path to an answer.** Sandbox cannot settle this; ask MoonPay directly, alongside the custody and withdrawal questions (§6):
+
+> *Does the "Pay with card" on-ramp support a native BTC recipient in production? It does not render in devnet for any currency — including USDC — so we cannot test it. The API accepts `canPayWithCard: true` on a BTC-recipient pay link and echoes it back as true.*
+
+### 5.2-RESULT-2 — repeated with a second wallet, and checked against production
+
+**Sandbox, re-run with a different BTC wallet (Leather, `tb1qzrrl7s6dzjq2qwz09q08m7xyqxarwa52864r2p`).** Same outcome, which rules out the first wallet being misconfigured:
+
+| Check | Result |
+|---|---|
+| Address format | OK - testnet (`tb1...`, 42 chars), passes MoonPay's own testnet regex |
+| Recipient shown on checkout | OK - `tb1qzr..r2p`, linked to `mempool.space/testnet/address/...` |
+| Pricing | OK - `$30 USD` -> `0.0003761 BTC` |
+| `canPayWithCard` echoed by API | OK - `true` |
+| **Card option in checkout** | **Absent** - only `Connect Wallet` |
+
+Four BTC pay links across two different wallets, plus the USDC control, all agree: **no card option in devnet for any currency.** Nothing about the BTC configuration is at fault.
+
+**Production catalogue check - the useful part.** `GET /v1/currency/all` is public, so production was queryable without production credentials. Native BTC differs meaningfully between environments:
+
+```
+production (450 currencies):
+  PAYMENT_PRICING, PAYMENT_RECIPIENT, DEPOSIT_CUSTOMER_CHECKOUT,
+  USD_RATE, NATIVE_TOKEN, WITHDRAWAL_DESTINATION      <-- present
+
+sandbox    (242 currencies):
+  PAYMENT_PRICING, PAYMENT_RECIPIENT, DEPOSIT_CUSTOMER_CHECKOUT,
+  NATIVE_TOKEN                                        <-- no WITHDRAWAL_DESTINATION
+```
+
+**This is the first hard evidence that the withdraw-BTC-to-an-external-address path exists in production** - the leg §4 depends on for reaching Binance. Previously it was inferred from the Withdrawals documentation; it is now read from the live catalogue. It remains unproven that an *exchange deposit address specifically* is an acceptable destination (§5.1 custody, §6 questions), but the capability itself is confirmed.
+
+**Attempting the full production probe was correctly refused:**
+
+```
+FAIL  could not list wallets (HTTP 401)
+      {"message":"Api key or token is invalid","code":401}
+```
+
+Sandbox keys (issued by `app.dev.hel.io`) do not authenticate against `api.hel.io`. That is correct environment isolation, not a fault.
+
+**To close gate §5.2 you need**, in this order:
+
+1. **Production Helio credentials** - sign in at **`app.hel.io`** (a different environment from `app.dev.hel.io`), then Developer -> API -> generate keys.
+2. **A mainnet BTC wallet registered** in that account - `bc1...` / `1...` / `3...`. This is where the real Binance deposit address goes, and the point at which §5.3's network-selection warning becomes live money.
+3. Re-run without touching `.env`:
+   ```bash
+   HELIO_BASE_URL=https://api.hel.io node scripts/commerce-probe.mjs
+   ```
+   Pass the base URL inline rather than editing `.env`, so a later run cannot hit production unintentionally.
+
+> **Expect a verification gate.** The associated MoonPay Ramps account reports `isVerified: false` with `hasMsa: false` ([`moonpay-sandbox-testing-status.md`](moonpay-sandbox-testing-status.md) §A.2b). Commerce production may likewise require KYB before issuing keys or accepting a payout wallet. If so, this is the same multi-week business process that gates standalone Ramps - worth discovering before budgeting time against it.
 
 ### 5.2a ⚠️ What sandbox can and cannot prove
 
