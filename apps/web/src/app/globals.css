@@ -62,3 +62,18 @@ body{font-family:'Plus Jakarta Sans',Arial,sans-serif}
   .campaign-detail{grid-template-columns:1fr}
   .onramp-frame{height:min(88vh,760px)}
 }
+
+/* Biswa Clay Tiles storefront branding and verified business content. */
+.brand{align-items:center;display:flex;font-size:17px;gap:10px}
+.brand img{background:#fff;border:1px solid var(--line);border-radius:50%;height:36px;object-fit:contain;padding:2px;width:36px}
+.footer-grid{grid-template-columns:1.6fr 1fr 1fr 1.25fr;gap:44px}
+.footer-brand img{background:#fff;border:1px solid #cbd8de;border-radius:50%;height:54px;margin-bottom:18px;object-fit:contain;padding:3px;width:54px}
+.contact-cards a{display:block;overflow-wrap:anywhere}
+.contact-cards p{color:var(--muted);margin-bottom:8px}
+.contact-cards small{color:var(--muted)}
+.home-hero>img{object-position:center 58%}
+
+@media(max-width:800px){
+  .footer-grid{grid-template-columns:1fr}
+  .brand span{font-size:15px}
+}

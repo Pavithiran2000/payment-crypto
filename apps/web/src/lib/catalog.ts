@@ -10,9 +10,10 @@ export type Product = {
 };
 
 export const products: Product[] = [
-  { slug: "classic-square-floor-tile", sku: "FT-4022", name: "Classic Square Floor Tile", text: "Traditional smooth finish, ideal for high-traffic interior spaces.", image: images.floorTile, specs: [["Size", "300 x 300 mm"], ["Thickness", "15 mm"]] },
-  { slug: "floral-pattern-jaali", sku: "JL-105", name: "Floral Pattern Jaali", text: "Elegant privacy screen blocks allowing natural light and ventilation.", image: images.jaaliProduct, specs: [["Size", "200 x 200 x 60 mm"], ["Weight", "2.5 kg"]] },
-  { slug: "rustic-brick-cladding", sku: "WT-809", name: "Rustic Brick Cladding", text: "Textured exterior wall tiles for a warm, natural facade.", image: images.brickProduct, specs: [["Size", "225 x 75 mm"], ["Finish", "Wire-cut"]] },
+  { slug: "nuvocotto-roof-tile", sku: "RT-NUVO", name: "Nuvocotto Roof Tile", text: "A refined natural-clay roof tile for sloped RCC and fabricated structures.", image: images.roofTile, specs: [["Size", "19.5 x 11.5 in"], ["Source", "Vietnam"]] },
+  { slug: "edan-jaali", sku: "JL-EDAN", name: "Edan Jaali", text: "A sculptural terracotta screen that filters daylight and supports natural airflow.", image: images.jaaliProduct, specs: [["Size", "300 x 200 x 100 mm"], ["Coverage", "1.55 pcs / sq.ft."]] },
+  { slug: "natural-red-floor-tile", sku: "FT-NR300", name: "Natural Red Floor Tile", text: "A warm, matte clay surface for interiors, terraces and courtyards.", image: images.floorTile, specs: [["Size", "300 x 300 x 10 mm"], ["Use", "Indoor + outdoor"]] },
+  { slug: "wire-cut-wall-tile", sku: "WT-WC", name: "Wire Cut Wall Tile", text: "Textured terracotta cladding for precise interior and exterior wall applications.", image: images.brickProduct, specs: [["Material", "Natural clay"], ["Finish", "Wire cut"]] },
 ];
 
 export function getProduct(slug: string) {
