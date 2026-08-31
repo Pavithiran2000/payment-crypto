@@ -62,9 +62,24 @@ export type VerifyCommerceResult =
     }
   | { valid: false; reason: string };
 
+/**
+ * Case-insensitive header lookup.
+ *
+ * Node lowercases incoming header names, so in production this is belt and
+ * braces. It matters anyway: a caller passing a hand-built map with canonical
+ * casing (`X-Signature`) would otherwise fail the signature check and DROP a
+ * legitimate webhook - failing closed, but losing the event this whole
+ * subsystem exists to preserve.
+ */
 function header(headers: VerifyCommerceInput['headers'], name: string): string | undefined {
-  const v = headers[name] ?? headers[name.toLowerCase()];
-  return Array.isArray(v) ? v[0] : v;
+  const want = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === want) {
+      const v = headers[key];
+      return Array.isArray(v) ? v[0] : v;
+    }
+  }
+  return undefined;
 }
 
 /** Constant-time hex compare that cannot throw on a length mismatch. */
@@ -109,7 +124,10 @@ export function verifyCommerceWebhook(input: VerifyCommerceInput): VerifyCommerc
   let parsed: Record<string, unknown>;
   try {
     const decoded: unknown = JSON.parse(input.rawBody.toString('utf8'));
-    if (typeof decoded !== 'object' || decoded === null) {
+    // `typeof [] === 'object'`, so arrays must be excluded explicitly or a
+    // JSON array would be accepted as a payload and produce a garbage event
+    // record with no event name and a hash-derived dedupe key.
+    if (typeof decoded !== 'object' || decoded === null || Array.isArray(decoded)) {
       return { valid: false, reason: 'body is not a JSON object' };
     }
     parsed = decoded as Record<string, unknown>;
