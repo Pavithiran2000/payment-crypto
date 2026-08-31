@@ -19,7 +19,8 @@
     "lint": "eslint .",
     "smoke": "node scripts/smoke.mjs",
     "check:erasure": "node scripts/erasure-check.mjs",
-    "verify": "pnpm build && pnpm lint && pnpm smoke && pnpm check:erasure"
+    "verify": "pnpm build && pnpm lint && pnpm smoke && pnpm check:erasure && pnpm check:commerce",
+    "check:commerce": "node scripts/commerce-check.mjs"
   },
   "pnpmComment": "overrides.fastify: Fastify plugins augment the FastifyInstance type. Multiple copies of fastify in the tree means those augmentations land on different type identities and plugin registration fails to type-check. Pin one copy.",
   "pnpm": {

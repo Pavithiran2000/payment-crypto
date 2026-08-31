@@ -20,24 +20,95 @@
 | MoonPay's real geographic gate | `GET https://api.moonpay.com/v4/ip_address` against this machine's own network resolved to Japan, which MoonPay's live `/v3/countries` list shows as `isBuyAllowed: false`. Confirmed against MoonPay's real, live countries list — 172 of 214 countries are buy-allowed; Japan and India are two of the exceptions. **This is the current network's real public IP, not a sandbox quirk or a proxy artifact** — worth knowing if testing stalls again with "Coming soon to your region." |
 | Webhook infrastructure | API endpoint (`/webhooks/moonpay`), ngrok tunnel, and the background order-status watcher all wired up and working mechanically (tunnel proxies correctly, confirmed via direct curl) |
 
-### A.2 Currently blocked
+### A.2 Currently blocked — diagnosis CORRECTED 2026-08-28
 
 **Symptom:** the widget shows *"Signature check failed — We couldn't validate the signature sent from the partner environment."*
 
-**Diagnosis, not a guess** — isolated by elimination:
-1. Our signing algorithm is proven correct (§A.1, both cross-checks).
-2. A **minimal** URL — just `apiKey` + `currencyCode` + `walletAddress`, matching MoonPay's own doc example almost exactly, built fresh with the live keys — **still fails**. This rules out any of our extra parameters (`redirectURL`, `baseCurrencyAmount`, `lockAmount`, `externalTransactionId`) as the cause.
-3. That same failing page correctly shows the account's branding and the Test Mode badge — meaning MoonPay recognizes `MOONPAY_PUBLISHABLE_KEY` fine. Only the value that depends on `MOONPAY_SECRET_KEY` is rejected.
+> ⚠️ **The earlier diagnosis in this section was wrong.** It said `MOONPAY_SECRET_KEY` was invalid / not recognised by MoonPay. That is **disproven** — the key authenticates successfully against MoonPay's API (below). The corrected finding is narrower: both keys are valid, but they are **not a matched pair**.
 
-**Conclusion:** `MOONPAY_SECRET_KEY` in `.env` does not match what MoonPay's server has on file for `MOONPAY_PUBLISHABLE_KEY`. Not a code bug.
+**What was tested on 2026-08-28, each with a control:**
 
-**Fix (needs dashboard access, so it's on you):**
-1. **dashboard.moonpay.com → Developers → API keys**, confirm you're on **Test/Sandbox**.
-2. Use the **copy button** on the Secret Key field — don't select/retype it by hand. A single dropped or transposed character produces exactly this symptom with no other clue.
-3. Replace `MOONPAY_SECRET_KEY` in `.env` (root of the repo) with the freshly copied value.
-4. Say the word and I'll restart the API and re-run the exact minimal-URL test immediately — that's the fastest way to confirm the fix before touching the full checkout flow again.
+| # | Test | Result |
+|---|---|---|
+| 1 | `GET /v1/transactions` with `Authorization: Api-Key sk_test_BR0RC…` | **HTTP 200** — the secret key is **valid** |
+| 2 | Same call with a deliberately fake `sk_test_…` (control) | HTTP 401 `4_SYS_NOT_AUTHORIZED` — proves the endpoint really does authenticate |
+| 3 | `GET /v1/customers` with the secret key | HTTP **400** (missing param), not 401 — passed auth, reached validation |
+| 4 | `GET /v3/accounts/me?apiKey=pk_test_GAh30…` | **HTTP 200** — publishable key valid, account `JAKAN & KAVIYA DISTRIBUTORS (PVT) LTD` |
+| 5 | Our `signQueryString` vs MoonPay's own published test vector | **exact match** — algorithm is correct |
+| 6 | Correctly-signed widget URL, loaded in a browser | ❌ "Signature check failed" |
+| 7 | **UNSIGNED** widget URL (no `signature` param at all) | ❌ **identical error message** |
+| 8 | `window.location` after load | `signature` param **survives** the redirect intact, uncorrupted |
 
-If the copy-button value *still* fails, regenerate the Secret Key on that same page (this mints a fresh, certainly-paired value) and repeat.
+**Two things test 7 establishes:**
+
+1. **This account has URL signing enforced.** An unsigned load is refused, which is the correct security posture — but
+2. **MoonPay returns the same message for "signature missing" and "signature invalid."** The wording is misleading, and it means the UI alone cannot distinguish the two cases. Any future debugging of this error must use the API-level checks above, not the widget text.
+
+**Test 8 rules out transport corruption.** Note the widget redirects `buy-sandbox.moonpay.com/` → `buy.moonpay.com/v2/buy`, changing both host and path, but query parameters (including `signature`) arrive intact and byte-correct.
+
+**Conclusion by elimination.** The algorithm is right (5), the signature reaches MoonPay intact (8), both keys are individually valid (1, 4), and signing is required (7). The only remaining variable is **pairing**: the `sk_` in `.env` is not the signing secret that belongs to this `pk_`. Most likely it came from a different key row, a different publishable key, or was superseded by a regeneration that left the old key valid for API auth.
+
+**Fix — dashboard access required, so this one is yours:**
+
+1. **dashboard.moonpay.com → Developers → API keys**, on **Test/Sandbox**.
+2. Copy the **publishable and secret keys together, from the same row**, using the copy buttons. The pairing is the thing that matters — a correct-looking secret from the wrong pair produces exactly this symptom.
+3. If there is any doubt, **regenerate the secret key**. That forces a known-good pair and is the fastest way to eliminate this variable.
+4. Update both `MOONPAY_PUBLISHABLE_KEY` and `MOONPAY_SECRET_KEY` in `.env` — not just the secret.
+
+**Verify the fix in seconds, without a browser:**
+
+```bash
+node scripts/moonpay-signature-check.mjs
+```
+
+### A.2b RESOLVED — root cause is account provisioning, not code
+
+**2026-08-28. The signature failure is not fixable from this codebase.** After eliminating every code-side hypothesis, the cause is that this MoonPay account is not provisioned for **standalone Ramps widget** integration.
+
+**Hypotheses tested and eliminated, in order:**
+
+| Hypothesis | Verdict | Evidence |
+|---|---|---|
+| Secret key invalid | ❌ wrong | Authenticates against MoonPay API (HTTP 200); fake key controls return 401 |
+| Keys not a matched pair | ❌ wrong | All three keys byte-identical to the dashboard, same lengths |
+| Signing algorithm wrong | ❌ wrong | Exact match against MoonPay's own published test vector |
+| Signature corrupted in transit | ❌ wrong | Arrives byte-intact after the `buy-sandbox` → `buy.moonpay.com/v2/buy` redirect |
+| Parameter ordering | ❌ wrong | Fails identically in insertion and alphabetical order |
+| Generic widget breakage | ❌ wrong | An unrecognised API key loads the widget fine — failure is account-specific |
+| **Account not provisioned for standalone Ramps** | ✅ **cause** | see below |
+
+**Evidence from `GET /v3/accounts/me`:**
+
+```
+isVerified            false     KYB not complete
+hasConfiguredRampFees null      Ramp fees never configured
+accessTier            null      no tier assigned
+hasMsa                false     no Master Service Agreement
+category              null
+allowedIframeAncestorUrls  ...,https://moonpay.hel.io,https://moonpay.dev.hel.io
+```
+
+The two `hel.io` entries are **MoonPay Commerce** domains, pre-populated by MoonPay. Combined with the dashboard showing **"Ramps only with Commerce plan"**, the reading is that Ramps is available on this account *through Commerce* — where the on-ramp is embedded inside Helio checkout — and **not** as a standalone signed-widget integration, which is what [`widget.ts`](../packages/providers/moonpay/src/widget.ts) builds.
+
+`hasConfiguredRampFees: null` is the specific tell: standalone Ramps requires fee configuration that has never been done on this account.
+
+**Consequence:** no key regeneration, code change, or parameter adjustment will fix this. It requires either MoonPay provisioning standalone Ramps for the account (KYB + MSA + fee configuration — a business process measured in weeks), or moving to the Commerce integration the account already supports.
+
+**This reverses the earlier sequencing advice.** Commerce was previously parked as a speculative alternative to evaluate *after* finishing Ramps. Ramps cannot be finished on this account as it stands, so Commerce moves onto the critical path — see [`moonpay-commerce-assessment.md`](moonpay-commerce-assessment.md) and [`commerce-sandbox-setup.md`](commerce-sandbox-setup.md).
+
+> Confirm the reading with MoonPay before acting on it. The account fields are suggestive, not a documented statement, and only MoonPay can say definitively whether standalone Ramps can be enabled here and what it would take.
+
+### A.2a Separate issue — `localhost` is not in the iframe allowlist
+
+The account's `allowedIframeAncestorUrls` is currently:
+
+```
+https://terracottatiles.online/, https://moonpay.hel.io, https://moonpay.dev.hel.io
+```
+
+`http://localhost:3001` is **absent**, so once the signature is fixed, framing the widget locally will fail a `frame-ancestors` CSP check — a *different* error from the signature one. Either add localhost in the dashboard for local testing, or test against the deployed `terracottatiles.online`, which is already allowlisted.
+
+(Worth noting: `moonpay.hel.io` and `moonpay.dev.hel.io` are **Commerce** domains, already allowlisted on this account — relevant to [`moonpay-commerce-assessment.md`](moonpay-commerce-assessment.md).)
 
 ### A.3 Once unblocked — remaining steps to a complete sandbox proof
 
